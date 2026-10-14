@@ -1,0 +1,28 @@
+# SwiftPM / Xcode build products
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/
+xcuserdata/
+
+# Local build logs, QA runs, index diagnostics and packaged apps.
+# Release packages are published on GitHub Releases instead.
+output/
+
+# Local research material and agent working state
+artifacts/
+.omx/
+项目协作.md
+项目记忆/
+
+# Python
+__pycache__/
+*.pyc
+
+# SQLite scratch databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# macOS
+.DS_Store

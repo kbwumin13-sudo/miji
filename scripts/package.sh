@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+project_dir="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$project_dir"
+configuration="${1:-release}"
+swift build -c "$configuration"
+binary_dir="$(swift build -c "$configuration" --show-bin-path)"
+app_path="$project_dir/output/觅迹.app"
+mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+cp "$binary_dir/Miji" "$app_path/Contents/MacOS/Miji"
+cp "$binary_dir/miji-cli" "$app_path/Contents/MacOS/miji-extract"
+cp resources/Info.plist "$app_path/Contents/Info.plist"
+mkdir -p "$app_path/Contents/Resources/Licenses"
+cp Vendor/OilFind/LICENSE "$app_path/Contents/Resources/Licenses/OilFind-MIT.txt"
+swift scripts/make-icon.swift output/AppIcon.iconset
+iconutil -c icns output/AppIcon.iconset -o "$app_path/Contents/Resources/AppIcon.icns"
+codesign --force --sign - --identifier com.haiyu.miji.extract "$app_path/Contents/MacOS/miji-extract"
+codesign --force --sign - --identifier com.haiyu.miji "$app_path"
+codesign --verify --deep --strict "$app_path"
+version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' resources/Info.plist)"
+ditto -c -k --sequesterRsrc --keepParent "$app_path" "$project_dir/output/觅迹-$version-macOS-arm64.zip"
+printf '%s\n' "$app_path"

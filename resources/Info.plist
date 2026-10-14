@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>觅迹</string>
+<key>CFBundleDisplayName</key><string>觅迹</string>
+<key>CFBundleExecutable</key><string>Miji</string>
+<key>CFBundleIdentifier</key><string>com.haiyu.miji</string>
+<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>1.1.0</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSDesktopFolderUsageDescription</key><string>觅迹在本机索引桌面文件的名称与内容，方便你搜索。</string>
+<key>NSDocumentsFolderUsageDescription</key><string>觅迹在本机索引文稿里的文件与文字，方便你搜索。</string>
+<key>NSDownloadsFolderUsageDescription</key><string>觅迹在本机索引下载文件的名称与内容，方便你搜索。</string>
+<key>NSRemovableVolumesUsageDescription</key><string>觅迹将外置磁盘的目录与提取内容保存在本机，断开后仍可搜索。</string>
+<key>NSNetworkVolumesUsageDescription</key><string>觅迹索引你选中的磁盘目录，帮助你定位文件。</string>
+</dict></plist>

@@ -51,7 +51,7 @@ enum NameSnapshotCache {
         snapshot.extensions=try decoder.array(UInt32.self)
         snapshot.kinds=try decoder.array(UInt32.self)
         snapshot.live=try decoder.array(UInt8.self)
-        snapshot.core=try autoreleasepool {try CompactNameIndex(serialized:decoder.block())}
+        snapshot.core=try autoreleasepool {try DeduplicatedNameIndex(serialized:decoder.block())}
         let count=snapshot.ids.count
         guard decoder.offset==payloadEnd,count<=Int(UInt32.max),snapshot.core.count==count,
               snapshot.sizes.count==count,snapshot.modified.count==count,snapshot.roots.count==count,
@@ -127,17 +127,27 @@ enum NameSnapshotCache {
             return try read(handle,count:Int(length))
         }
         mutating func array<T>(_ type:T.Type)throws->[T] {
-            try autoreleasepool {
-                let bytes=try block(),stride=MemoryLayout<T>.stride
-                guard bytes.count%stride==0 else {throw InvalidCache()}
-                let count=bytes.count/stride
-                return [T](unsafeUninitializedCapacity:count) {buffer,initialized in
-                    bytes.withUnsafeBytes {source in
-                        if !source.isEmpty {UnsafeMutableRawBufferPointer(buffer).copyMemory(from:source)}
-                    }
-                    initialized=count
+            // Only the primitive numeric columns above use this decoder. Read
+            // into their final storage instead of retaining a full Data copy.
+            guard offset<=end-8 else {throw InvalidCache()}
+            let length=try read(handle,count:8).withUnsafeBytes {$0.loadUnaligned(as:UInt64.self).littleEndian}
+            offset+=8
+            let stride=MemoryLayout<T>.stride
+            guard length<=UInt64(end-offset),length%UInt64(stride)==0 else {throw InvalidCache()}
+            let bytes=Int(length),count=bytes/stride
+            let result=try [T](unsafeUninitializedCapacity:count) {buffer,initialized in
+                let destination=UnsafeMutableRawBufferPointer(buffer)
+                var received=0
+                while received<bytes {
+                    let size=Darwin.read(handle.fileDescriptor,destination.baseAddress!.advanced(by:received),min(1_048_576,bytes-received))
+                    if size<0 && errno==EINTR {continue}
+                    guard size>0 else {throw InvalidCache()}
+                    received+=size
                 }
+                initialized=count
             }
+            offset+=bytes
+            return result
         }
     }
 }

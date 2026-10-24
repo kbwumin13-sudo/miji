@@ -77,7 +77,7 @@ final class NameMetadataReader {
 /// No FileRecord objects, bodies, root JSON or per-file Swift path strings.
 final class NameSnapshot {
     static let columns = "id,root_id,name,extension,kind,size,modified"
-    var core = CompactNameIndex()
+    var core = DeduplicatedNameIndex()
     var ids: [Int64] = [], sizes: [Int64] = [], modified: [Double] = []
     var roots: [UInt32] = [], extensions: [UInt32] = [], kinds: [UInt32] = []
     var live: [UInt8] = []

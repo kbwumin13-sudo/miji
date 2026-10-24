@@ -31,11 +31,54 @@ enum IndexRelativePath {
         parent.isEmpty || parent == child || child.hasPrefix(parent + "/")
     }
     static func coalescing(_ paths: [String]) -> [String] {
-        var result:[String]=[]
-        for path in Set(paths).sorted(by:{ $0.count < $1.count }) where validated(path) {
-            if !result.contains(where:{ contains($0,path) }) { result.append(path) }
+        let unique=Set(paths.filter(validated))
+        if unique.contains("") { return [""] }
+        return unique.filter { path in
+            var parent=(path as NSString).deletingLastPathComponent
+            while !parent.isEmpty {
+                if unique.contains(parent) { return false }
+                parent=(parent as NSString).deletingLastPathComponent
+            }
+            return true
+        }.sorted()
+    }
+    /// Under pressure widen only to affected subdirectories, never to the
+    /// watched root merely because a numeric queue limit was crossed.
+    static func compacting(_ paths: [String], limit: Int = 2_048) -> [String] {
+        let paths=coalescing(paths)
+        guard paths.count > limit else { return paths }
+        var counts:[String:Int]=[:]
+        for path in paths {
+            var parent=(path as NSString).deletingLastPathComponent
+            while !parent.isEmpty {
+                counts[parent,default:0] += 1
+                parent=(parent as NSString).deletingLastPathComponent
+            }
         }
-        return result
+        let candidates=counts.keys.filter {counts[$0]! > 1}.sorted {
+            let a=$0.split(separator:"/").count,b=$1.split(separator:"/").count
+            if a != b {return a > b}
+            if counts[$0] != counts[$1] {return counts[$0]! > counts[$1]!}
+            return $0 < $1
+        }
+        var selected=Set<String>(),reductions:[String:Int]=[:],remaining=paths.count
+        for parent in candidates where remaining > limit {
+            // Carry each reduction to its ancestors once. Comparing against
+            // every selected sibling made wide event storms quadratic while
+            // the service lock was held.
+            let covered=counts[parent]! - (reductions[parent] ?? 0)
+            guard covered > 1 else {continue}
+            remaining -= covered-1
+            selected.insert(parent)
+            var ancestor=(parent as NSString).deletingLastPathComponent
+            while !ancestor.isEmpty {
+                reductions[ancestor,default:0] += covered-1
+                ancestor=(ancestor as NSString).deletingLastPathComponent
+            }
+        }
+        // A root with thousands of direct child files has no narrower common
+        // directory. Keep their exact paths instead of inventing a full scan.
+        return coalescing(paths + selected)
     }
     /// Package children contribute to the package signature, not separate rows.
     static func packageScope(_ relative: String) -> String {
@@ -57,6 +100,7 @@ struct IncrementalIndexState: Codable {
         var cursor: UInt64
         var pending: [String]
         var inFlight: [String] = []
+        var scan: FileScanCheckpoint? = nil
     }
     var roots: [String:Root] = [:]
     static func read(_ url: URL) -> IncrementalIndexState {
@@ -76,10 +120,7 @@ struct IncrementalIndexState: Codable {
     }
     mutating func enqueue(_ paths: [String], rootID: String) {
         guard var root=roots[rootID] else { return }
-        root.pending=IndexRelativePath.coalescing(root.pending + paths)
-        // Bound the inbox even during a large move. This is the deliberate
-        // recovery path, rather than allowing unbounded metadata in memory.
-        if root.pending.count > 2_048 { root.pending=[""] }
+        root.pending=IndexRelativePath.compacting(root.pending + paths)
         roots[rootID]=root
     }
 }

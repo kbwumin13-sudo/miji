@@ -1,8 +1,40 @@
 import XCTest
 import CSQLite
+import CryptoKit
 @testable import MijiCore
 
 final class NameSnapshotCacheTests:XCTestCase {
+    func testEmptyCacheNumericColumnsRoundTrip() throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:directory)}
+        let url=directory.appendingPathComponent("index.sqlite"),db=try SearchDatabase(url:url)
+        try db.saveRoot(IndexedRoot(id:"r",path:directory.path))
+        let engine=try NameSearchEngine(databaseURL:url);try engine.load();try engine.saveCache()
+        let snapshot=try NameSnapshotCache.load(database:url,revision:0)
+        XCTAssertEqual(snapshot.ids.count,0)
+        XCTAssertEqual(snapshot.core.count,0)
+        let restarted=try NameSearchEngine(databaseURL:url);try restarted.load()
+        XCTAssertEqual(try restarted.search("anything"),[])
+    }
+    func testChecksummedInvalidNumericColumnLengthsAreRejected() throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:directory)}
+        let url=directory.appendingPathComponent("index.sqlite"),db=try SearchDatabase(url:url)
+        try db.saveRoot(IndexedRoot(id:"r",path:directory.path));try db.upsertFiles([file("correct.txt")],generation:1)
+        let engine=try NameSearchEngine(databaseURL:url);try engine.load();try engine.saveCache()
+        let cache=NameSnapshotCache.url(for:url),original=try Data(contentsOf:cache)
+        let headerSize=original.withUnsafeBytes {$0.loadUnaligned(fromByteOffset:8,as:UInt64.self).littleEndian}
+        let firstColumn=16+Int(headerSize)
+        for length in [UInt64(7),UInt64.max] {
+            var bytes=original
+            for i in 0..<8 {bytes[firstColumn+i]=UInt8(truncatingIfNeeded:length >> (i*8))}
+            bytes.replaceSubrange((bytes.count-32)..<bytes.count,with:Data(SHA256.hash(data:bytes.dropLast(32))))
+            try bytes.write(to:cache)
+            XCTAssertThrowsError(try NameSnapshotCache.load(database:url,revision:1))
+            let recovered=try NameSearchEngine(databaseURL:url);try recovered.load()
+            XCTAssertEqual(try recovered.search("correct").count,1)
+        }
+    }
     func testStartupCompactsRenameTombstonesAndDoesNotRewriteCleanCache() throws {
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:directory)}

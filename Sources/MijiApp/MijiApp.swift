@@ -10,6 +10,7 @@ import MijiCore
 enum MijiEntry {
     static func main() {
         let app=NSApplication.shared
+        app.setActivationPolicy(.accessory)
         let delegate=AppDelegate()
         app.delegate=delegate
         app.run()
@@ -57,21 +58,19 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         if status != noErr {model.message="全局快捷键 ⌃⌥Space 已被占用。仍可从菜单栏打开觅迹。"}
         monitor=NSEvent.addLocalMonitorForEvents(matching:.keyDown){[weak self] event in
             guard let self,NSApp.keyWindow===self.searchPanel else{return event}
-            let command=event.modifierFlags.contains(.command)
-            if command {
-                if event.keyCode==3 {self.model.focusSearch=UUID();return nil}
-                if event.keyCode==15 {self.model.revealSelected();return nil}
-                if event.keyCode==16 {self.preview();return nil}
-                if event.keyCode==8,event.modifierFlags.contains(.shift) {self.model.copySelectedPath();return nil}
-                if event.keyCode==13 {self.hideSearch();return nil}
-                if event.keyCode==43 {self.openSettings();return nil}
+            switch SearchKeyAction.action(for:event,firstResponder:self.searchPanel.firstResponder) {
+            case .focusSearch: self.model.focusSearch=UUID()
+            case .reveal: self.model.revealSelected()
+            case .preview: self.preview()
+            case .copyPath: self.model.copySelectedPath()
+            case .hide: self.hideSearch()
+            case .settings: self.openSettings()
+            case .moveDown: self.model.moveSelection(1)
+            case .moveUp: self.model.moveSelection(-1)
+            case .open: self.model.openSelected()
+            case nil: return event
             }
-            if event.keyCode==125 {self.model.moveSelection(1);return nil}
-            if event.keyCode==126 {self.model.moveSelection(-1);return nil}
-            if event.keyCode==36 {if command {self.model.revealSelected()}else{self.model.openSelected()};return nil}
-            if event.keyCode==49,!(self.searchPanel.firstResponder is NSTextView){self.preview();return nil}
-            if event.keyCode==53 {self.hideSearch();return nil}
-            return event
+            return nil
         }
         DispatchQueue.main.async{self.showSearch()}
     }

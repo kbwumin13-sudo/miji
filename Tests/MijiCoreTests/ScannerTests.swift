@@ -115,6 +115,8 @@ final class ScannerTests:XCTestCase {
         XCTAssertTrue(policy.skipsDirectory(path:"/System/Volumes/Data/Users",volumeUUID:"data"))
         XCTAssertTrue(policy.skipsDirectory(path:"/Volumes",volumeUUID:"data"))
         XCTAssertTrue(policy.skipsDirectory(path:"/Volumes/External",volumeUUID:"external"))
+        XCTAssertTrue(policy.skipsDirectory(path:"/.nofollow",volumeUUID:"system"))
+        XCTAssertTrue(policy.skipsDirectory(path:"/.nofollow/",volumeUUID:"system"))
         XCTAssertTrue(policy.skipsDirectory(path:"/Users/mounted",volumeUUID:"external"))
         let ordinary = ScanVolumePolicy(root:IndexedRoot(path:"/Users",volumeUUID:"data"),dataVolumeUUID:"data")
         XCTAssertTrue(ordinary.skipsDirectory(path:"/Users/mounted",volumeUUID:"external"))
@@ -124,6 +126,13 @@ final class ScannerTests:XCTestCase {
         let actualRoot = try VolumeIdentity.root(for:URL(fileURLWithPath:"/"))
         let usersUUID = try URL(fileURLWithPath:"/Users").resourceValues(forKeys:[.volumeUUIDStringKey]).volumeUUIDString
         XCTAssertFalse(ScanVolumePolicy(root:actualRoot).skipsDirectory(path:"/Users",volumeUUID:usersUUID))
+    }
+    func testVirtualNoFollowRootAliasDoesNotQueueFullRootRecovery() throws {
+        let root=try VolumeIdentity.root(for:URL(fileURLWithPath:"/"))
+        let result=try FileScanner(database:database).scan(root:root,relativePath:".nofollow")
+        XCTAssertTrue(result.complete)
+        XCTAssertEqual(result.count,0)
+        XCTAssertTrue(result.preservingPaths.isEmpty)
     }
     func testCodeIsPendingAndSelfIndexPathsArePreciselyExcluded() throws {
         let appData = folder.appendingPathComponent("MijiData")

@@ -28,6 +28,31 @@ public final class CompactNameIndex {
     public var count: Int { names.offsets.count - 1 }
     public init() {}
 
+    /// Array element bytes, including reusable builder scratch; excludes object
+    /// headers, allocator overhead and temporary query/serialization buffers.
+    public var storageBytes: Int {
+        names.bytes.count + full.bytes.count + initials.bytes.count
+            + (names.offsets.count + full.offsets.count + initials.offsets.count) * MemoryLayout<UInt32>.stride
+            + live.count + aliases.count + fullKey.count + initialKey.count
+    }
+    public var allocatedStorageBytes: Int {
+        names.bytes.capacity + full.bytes.capacity + initials.bytes.capacity
+            + (names.offsets.capacity + full.offsets.capacity + initials.offsets.capacity) * MemoryLayout<UInt32>.stride
+            + live.capacity + aliases.capacity + fullKey.capacity + initialKey.capacity
+    }
+
+    /// Stable FNV-1a over the stored normalized UTF-8, including embedded NUL.
+    /// Equality must still be checked when hashes collide.
+    public func normalizedNameHash(_ index: UInt32) -> UInt64 {
+        let i = Int(index)
+        return Self.hashNameBytes(names.bytes[Int(names.offsets[i])..<Int(names.offsets[i + 1])])
+    }
+    static func hashNameBytes<Bytes: Sequence>(_ bytes: Bytes) -> UInt64 where Bytes.Element == UInt8 {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in bytes { hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211 }
+        return hash
+    }
+
     /// Stable v1, little-endian: magic/version/count, then three columns
     /// (byteCount/bytes/count+1 offsets), live/aliases, and SHA-256 of all prior
     /// bytes. No Swift object layout or metadata is persisted.
@@ -179,6 +204,7 @@ public final class CompactNameIndex {
         aliases.append(alias)
     }
 
+    @inline(__always)
     public func compareNames(_ lhs: UInt32, _ rhs: UInt32) -> Int {
         // SQLite BINARY ordering of normalized UTF-8, including embedded NUL.
         names.bytes.withUnsafeBufferPointer { bytes in

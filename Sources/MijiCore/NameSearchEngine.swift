@@ -168,7 +168,20 @@ public final class NameSearchEngine: @unchecked Sendable {
         if allowedRoots.isEmpty { return [] }
         let pathTerms = parsed.terms.filter { $0.field == .path }
         let paths = pathTerms.isEmpty ? nil : try pathMatches(pathTerms, current: current, options: options, reader: reader)
-        let filters = parsed.terms.filter { $0.field == .kind || $0.field == .ext }
+        // Resolve aliases and interned keys once, before visiting candidates.
+        // Missing exclusions impose no restriction; missing positive keys can
+        // never match. Still visit the core to retain its cancellation checks.
+        var filters: [NameMetadataFilter] = []
+        var filtersPossible = true
+        for term in parsed.terms where term.field == .kind || term.field == .ext {
+            let isKind = term.field == .kind
+            let value = isKind ? current.kindKeys[QueryParser.kindValue(term.value)] : current.extensionKeys[term.value]
+            guard let value else {
+                if !term.isExcluded { filtersPossible = false }
+                continue
+            }
+            filters.append(NameMetadataFilter(value: value, isKind: isKind, isExcluded: term.isExcluded))
+        }
         let kind = options.kind.flatMap { current.kindKeys[$0.rawValue] }
         if options.kind != nil && kind == nil { return [] }
         let textTerms = parsed.terms.filter { $0.field == .text }.map { CompactNameIndex.Term(value: $0.value, excluded: $0.isExcluded) }
@@ -184,13 +197,11 @@ public final class NameSearchEngine: @unchecked Sendable {
         }
         try current.core.forEachMatch(textTerms, cancelled: cancelled) { index, score in
             let i = Int(index)
-            guard allowedRoots.contains(current.roots[i]), kind == nil || current.kinds[i] == kind else { return }
+            guard filtersPossible, allowedRoots.contains(current.roots[i]), kind == nil || current.kinds[i] == kind else { return }
             if let paths, paths[i / 64] & (UInt64(1) << (i % 64)) == 0 { return }
-            for term in filters {
-                let match: Bool
-                if term.field == .kind { match = current.kindKeys[QueryParser.kindValue(term.value)] == current.kinds[i] }
-                else { match = current.extensionKeys[term.value] == current.extensions[i] }
-                if term.isExcluded ? match : !match { return }
+            for filter in filters {
+                let match = (filter.isKind ? current.kinds[i] : current.extensions[i]) == filter.value
+                if filter.isExcluded ? match : !match { return }
             }
             heap.insert(NameRankedHit(index: index, score: score))
         }
@@ -199,6 +210,7 @@ public final class NameSearchEngine: @unchecked Sendable {
     }
 
     private func publish(_ value: NameSnapshot, version: UInt64, cancelled: () -> Bool) throws {
+        try value.core.prepareNameOrder(cancelled: cancelled)
         if cancelled() { throw CancellationError() }
         stateLock.lock(); defer { stateLock.unlock() }
         guard version == revision else { throw NameSearchEngineError.invalidated }
@@ -289,6 +301,11 @@ public final class NameSearchEngine: @unchecked Sendable {
     }
 }
 
+private struct NameMetadataFilter {
+    let value: UInt32
+    let isKind: Bool
+    let isExcluded: Bool
+}
 private struct NameRankedHit { let index: UInt32; let score: Int32 }
 /// Worst hit at the root. Memory is O(limit), even for an empty/one-character query.
 private struct NameHitHeap {

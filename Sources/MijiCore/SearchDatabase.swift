@@ -79,8 +79,16 @@ public final class SearchDatabase: @unchecked Sendable {
 
     public func saveRoot(_ root: IndexedRoot) throws {
         try synchronized {
-            try run("INSERT INTO roots(id,payload,online,enabled) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,online=excluded.online,enabled=excluded.enabled",
-                    [.string(root.id), .string(try encode(root)), .integer(root.isOnline ? 1 : 0), .integer(root.enabled ? 1 : 0)])
+            // Stable key order makes repeated saves comparable, without changing
+            // the encoder used for content digests or the v2 payload format.
+            let rootEncoder = JSONEncoder()
+            rootEncoder.outputFormatting = .sortedKeys
+            let payload = String(decoding: try rootEncoder.encode(root), as: UTF8.self)
+            try run("""
+                INSERT INTO roots(id,payload,online,enabled) VALUES(?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,online=excluded.online,enabled=excluded.enabled
+                WHERE roots.payload IS NOT excluded.payload OR roots.online<>excluded.online OR roots.enabled<>excluded.enabled
+                """, [.string(root.id), .string(payload), .integer(root.isOnline ? 1 : 0), .integer(root.enabled ? 1 : 0)])
         }
     }
 
@@ -94,26 +102,52 @@ public final class SearchDatabase: @unchecked Sendable {
             try transaction {
                 let statement = try prepare(Self.upsert)
                 defer { sqlite3_finalize(statement) }
-                // Avoid repeated transliteration for unchanged names in a scan.
-                let existing = try prepare("SELECT name,pinyin_search,initials_search FROM files WHERE root_id=? AND relative_path=?")
+                // Compare with SQLite's equality rules and the same state/error
+                // semantics as upsert. A generation touch must not rewrite name,
+                // content or secondary indexes, or consume an AUTOINCREMENT ID.
+                let existing = try prepare("""
+                    SELECT id,generation,
+                      name=? AND extension=? AND kind=? AND size=? AND modified=? AND inode=?
+                      AND (content_state IN ('done','error') OR (content_state=? AND content_error IS ?)),
+                      name,pinyin_search,initials_search
+                    FROM files WHERE root_id=? AND relative_path=?
+                    """)
                 defer { sqlite3_finalize(existing) }
+                let touch = try prepare("UPDATE files SET generation=? WHERE id=?")
+                defer { sqlite3_finalize(touch) }
                 for file in files {
                     try Self.validateRelativePath(file.relativePath)
                     let state = ["deferred", "skipped"].contains(file.contentState) ? file.contentState : "pending"
+                    let contentError: Value = state == "pending" ? .null : (file.contentError.map(Value.string) ?? .null)
+                    let fileExtension = QueryParser.normalize(file.fileExtension).trimmingCharacters(in: CharacterSet(charactersIn: "."))
                     sqlite3_reset(existing)
                     sqlite3_clear_bindings(existing)
-                    try bind([.string(file.rootID), .string(file.relativePath)], to: existing)
+                    try bind([.string(file.name), .string(fileExtension), .string(file.kind.rawValue),
+                              .integer(file.size), .real(file.modified), .integer(file.inode), .string(state), contentError,
+                              .string(file.rootID), .string(file.relativePath)], to: existing)
                     let romanized: (String, String)
-                    if try next(existing), text(existing, 0) == file.name {
-                        romanized = (text(existing, 1), text(existing, 2))
+                    let found = try next(existing)
+                    if found, sqlite3_column_int(existing, 2) == 1 {
+                        if sqlite3_column_int64(existing, 1) != generation {
+                            let id = sqlite3_column_int64(existing, 0)
+                            sqlite3_reset(existing)
+                            sqlite3_reset(touch)
+                            sqlite3_clear_bindings(touch)
+                            try bind([.integer(generation), .integer(id)], to: touch)
+                            try done(touch)
+                        }
+                        continue
+                    }
+                    if found, text(existing, 3) == file.name {
+                        romanized = (text(existing, 4), text(existing, 5))
                     } else { romanized = Self.pinyin(file.name) }
                     sqlite3_reset(statement)
                     sqlite3_clear_bindings(statement)
                     try bind([
                         .string(file.rootID), .string(file.relativePath), .string(file.name),
-                        .string(QueryParser.normalize(file.fileExtension).trimmingCharacters(in: CharacterSet(charactersIn: "."))),
+                        .string(fileExtension),
                         .string(file.kind.rawValue), .integer(file.size), .real(file.modified), .integer(file.inode),
-                        .string(state), state == "pending" ? .null : (file.contentError.map(Value.string) ?? .null), .integer(generation),
+                        .string(state), contentError, .integer(generation),
                         .string(QueryParser.normalize(file.name)), .string(romanized.0), .string(romanized.1),
                         .string(QueryParser.normalize(file.relativePath))
                     ], to: statement)

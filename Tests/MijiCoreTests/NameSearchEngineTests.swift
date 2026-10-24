@@ -92,6 +92,94 @@ final class NameSearchEngineTests: XCTestCase {
         XCTAssertEqual(try e.search("sxrkcp"), [17])
     }
 
+    func testCompiledTypeFiltersResolveChineseAliasesAndRawKinds() throws {
+        let kinds: [FileKind] = [.document, .folder, .image, .audio, .video, .archive, .application, .code, .other]
+        for (i, kind) in kinds.enumerated() {
+            try add(Int64(i + 1), "item\(i)", name: "条目", ext: "bin", kind: kind)
+        }
+        let e = try engine()
+        let aliases: [(String, Int64)] = [
+            ("文档", 1), ("文件夹", 2), ("目录", 2), ("图片", 3), ("图像", 3),
+            ("音频", 4), ("视频", 5), ("压缩包", 6), ("应用", 7), ("代码", 8), ("其他", 9)
+        ]
+        let all = (1...9).map { Int64($0) }
+        for (alias, id) in aliases {
+            XCTAssertEqual(try e.search("kind:\(alias)"), [id], alias)
+            XCTAssertEqual(try e.search("-kind:\(alias)"), all.filter { $0 != id }, alias)
+        }
+        for (i, kind) in kinds.enumerated() {
+            XCTAssertEqual(try e.search("kind:\(kind.rawValue.uppercased())"), [Int64(i + 1)])
+        }
+    }
+
+    func testCompiledTypeFiltersKeepUnknownAndCustomMetadataSemantics() throws {
+        try add(1, "first", name: "条目", ext: "pdf")
+        try add(2, "second", name: "条目", ext: "png", kind: .image)
+        try add(3, "third", name: "条目", ext: "", kind: .other)
+        try add(4, "fourth", name: "条目", ext: "cafe\u{301}")
+        // Unknown to FileKind but present in the snapshot must remain searchable.
+        try exec("UPDATE files SET kind='custom-kind' WHERE id=4")
+        let e = try engine()
+        for query in ["kind:missing", "ext:missing", "-kind:missing ext:missing", "kind:missing -ext:missing"] {
+            XCTAssertEqual(try e.search(query), [], query)
+        }
+        for query in ["-kind:missing", "-ext:missing", "-kind:missing -ext:missing"] {
+            XCTAssertEqual(try e.search(query), [1,2,3,4], query)
+        }
+        XCTAssertEqual(try e.search("kind:custom-kind"), [4])
+        XCTAssertEqual(try e.search("-kind:custom-kind"), [1,2,3])
+        XCTAssertEqual(try e.search("kind:其他"), [3])
+        XCTAssertEqual(try e.search("-kind:其他 -ext:pdf -ext:png"), [4])
+        XCTAssertEqual(try e.search("ext:.CAFÉ kind:custom-kind -kind:missing"), [4])
+        XCTAssertEqual(try e.search("-ext:café"), [1,2,3])
+        // Empty filter values are ignored by the existing parser.
+        XCTAssertEqual(try e.search("ext:. kind:"), [1,2,3,4])
+        XCTAssertEqual(try e.search("kind:missing", options: SearchOptions(limit: 0)), [])
+    }
+
+    func testCompiledTypeFiltersIntersectRepeatedAndContradictoryTerms() throws {
+        try add(1, "a.pdf")
+        try add(2, "b.txt")
+        try add(3, "c.png", kind: .image)
+        let e = try engine()
+        XCTAssertEqual(try e.search("kind:文档 kind:document ext:.PDF ext:pdf -kind:图片 -ext:png"), [1])
+        XCTAssertEqual(try e.search("-kind:图像 -kind:image -ext:png -ext:png"), [1,2])
+        for query in [
+            "kind:document kind:image", "ext:pdf ext:txt",
+            "kind:文档 -kind:document", "ext:.PDF -ext:pdf",
+            "kind:文档 ext:pdf -kind:图片 -ext:pdf",
+            "kind:missing -kind:missing", "ext:missing -ext:missing"
+        ] {
+            XCTAssertEqual(try e.search(query), [], query)
+        }
+        XCTAssertEqual(try e.search("kind:图片", options: SearchOptions(kind: .document)), [])
+        XCTAssertEqual(try e.search("-kind:文档", options: SearchOptions(kind: .document)), [])
+        XCTAssertEqual(try e.search("-kind:missing ext:pdf", options: SearchOptions(kind: .document)), [1])
+        XCTAssertEqual(try e.search("-kind:missing", options: SearchOptions(kind: .audio)), [])
+    }
+
+    func testCompiledTypeFiltersPreserveRootPathOfflineSortAndLimit() throws {
+        try add(1, "课程/a.pdf", size: 2, modified: 10)
+        try add(2, "课程/b.pdf", root: "disk", size: 3, modified: 30)
+        try add(3, "课程/c.pdf", size: 1, modified: 20)
+        try add(4, "课程/d.png", kind: .image, size: 90, modified: 90)
+        try add(5, "课程/e.txt", size: 80, modified: 80)
+        try add(6, "其它/z.pdf", size: 70, modified: 70)
+        let e = try engine()
+        let query = "kind:文档 ext:pdf -kind:图片 -ext:txt -kind:missing -ext:missing path:课程"
+        XCTAssertEqual(try e.search(query), [1,2,3])
+        XCTAssertEqual(try e.search(query, options: SearchOptions(kind: .document, sort: .name)), [1,2,3])
+        XCTAssertEqual(try e.search(query, options: SearchOptions(sort: .modified)), [2,3,1])
+        XCTAssertEqual(try e.search(query, options: SearchOptions(sort: .size, limit: 2)), [2,1])
+        XCTAssertEqual(try e.search(query, options: SearchOptions(rootID: "local", onlineOnly: true)), [1,3])
+        XCTAssertEqual(try e.search(query, options: SearchOptions(rootID: "disk")), [2])
+        XCTAssertEqual(try e.search(query, options: SearchOptions(rootID: "disk", onlineOnly: true)), [])
+        XCTAssertEqual(try e.search(query, options: SearchOptions(kind: .image)), [])
+        XCTAssertEqual(try e.search(query + " -path:课程/b"), [1,3])
+        try exec("UPDATE roots SET online=1 WHERE id='disk'")
+        XCTAssertEqual(try e.search(query, options: SearchOptions(rootID: "disk", onlineOnly: true)), [2])
+    }
+
     func testMultiRootOfflineAndAvailabilityWithoutReload() throws {
         try add(21, "数学.pdf"); try add(22, "数学.pdf", root: "disk")
         let e = try engine()
@@ -410,8 +498,12 @@ final class NameSearchEngineTests: XCTestCase {
         XCTAssertThrowsError(try e.load(cancelled: { polls += 1; return polls >= 30 })) { XCTAssertTrue($0 is CancellationError) }
         XCTAssertFalse(e.isReady)
         try e.load()
-        polls = 0
-        XCTAssertThrowsError(try e.search("不匹配", cancelled: { polls += 1; return polls >= 8 })) { XCTAssertTrue($0 is CancellationError) }
+        for query in ["不匹配", "kind:文档 ext:pdf", "kind:missing", "ext:missing", "kind:文档 -kind:文档"] {
+            polls = 0
+            XCTAssertThrowsError(try e.search(query, cancelled: { polls += 1; return polls >= 8 }), query) {
+                XCTAssertTrue($0 is CancellationError)
+            }
+        }
         XCTAssertTrue(e.isReady)
         XCTAssertEqual(try e.search("数学000001"), [1])
         polls = 0

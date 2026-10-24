@@ -45,6 +45,8 @@ public final class IndexService: @unchecked Sendable {
     private var mutations = 0
     private var preferences = IndexingPreferences()
     private var watcher: FileWatcher?
+    // Only used on work; suspended sessions retain their directory iterator.
+    private var scanSessions: [String:FileScanSession] = [:]
     private var timer: DispatchSourceTimer?
     private var debounce: DispatchWorkItem?
     private let ignoredPaths: [String]
@@ -73,8 +75,10 @@ public final class IndexService: @unchecked Sendable {
         let inboxURL=stateURL ?? database.url.appendingPathExtension("incremental.json")
         self.stateURL=inboxURL
         self.state=IncrementalIndexState.read(inboxURL)
-        for (id,root) in self.state.roots {
-            self.state.roots[id]?.pending=IndexRelativePath.coalescing(root.pending + root.inFlight)
+        for (id,root) in self.state.roots where root.scan == nil {
+            // Older versions have no saved traversal cursor. They start a new
+            // scan, so overlapping legacy queues can safely be combined once.
+            self.state.roots[id]?.pending=IndexRelativePath.compacting(root.pending + root.inFlight)
             self.state.roots[id]?.inFlight=[]
         }
         self.watchEvents=watchEvents
@@ -177,21 +181,23 @@ public final class IndexService: @unchecked Sendable {
                 // against the checkpoint from before this batch, not an ID
                 // advanced by another path in the same callback.
                 let cursors=state.roots.mapValues(\.cursor)
+                var scopes:[String:[String]]=[:]
                 for event in events {
                     for (id,checkpoint) in state.roots {
                         if event.id > 0 && event.id <= (cursors[id] ?? 0) && !event.requiresFullScan { continue }
                         if event.requiresFullScan {
                             // A dropped stream may not identify the affected
                             // subtree. Conservatively reconcile all stream roots.
-                            state.enqueue([""],rootID:id)
+                            scopes[id,default:[]].append("")
                         } else if !event.historyDone, !filter.ignores(event.path),
                                   let relative=IndexRelativePath.from(event.path,root:checkpoint.path) {
-                            state.enqueue([IndexRelativePath.packageScope(relative)],rootID:id)
+                            scopes[id,default:[]].append(IndexRelativePath.packageScope(relative))
                         }
                         // RootChanged can carry ID 0; never move a cursor back.
                         state.roots[id]?.cursor=max(checkpoint.cursor,event.id)
                     }
                 }
+                for (id,paths) in scopes {state.enqueue(paths,rootID:id)}
                 try persistState()
             }
         } catch { emit("增量状态无法保存",error.localizedDescription);return }
@@ -228,6 +234,8 @@ public final class IndexService: @unchecked Sendable {
             }
         }
         let currentID=FSEventsGetCurrentEventId()
+        let ids=Set(roots.map(\.id))
+        scanSessions=scanSessions.filter {ids.contains($0.key)}
         let manualFull=locked { () -> Bool in
             if fullRequested && Date() >= nextScanAfter { fullRequested=false;return true }
             return false
@@ -242,13 +250,12 @@ public final class IndexService: @unchecked Sendable {
             try database.saveRoot(root)
             try locked {
                 if let old=state.roots[root.id] {
-                    // A previous run may have yielded or been cancelled after
-                    // claiming scopes. They remain durable until acknowledged.
-                    state.roots[root.id]?.pending=IndexRelativePath.coalescing(old.pending + old.inFlight)
-                    state.roots[root.id]?.inFlight=[]
+                    // Keep arrivals separate from a suspended traversal: a new
+                    // file may be behind its cursor and must be scanned again.
                     if old.path != root.path || old.cursor > currentID || (!existing.isOnline && root.isOnline) {
                         state.roots[root.id]?.path=root.path
                         state.roots[root.id]?.cursor=currentID
+                        state.roots[root.id]?.scan=nil
                         state.enqueue([""],rootID:root.id)
                     }
                 } else {
@@ -256,7 +263,7 @@ public final class IndexService: @unchecked Sendable {
                     // before scanning, so events during the scan are durable.
                     state.roots[root.id] = .init(path:root.path,cursor:currentID,pending:[""])
                 }
-                if manualFull { state.enqueue([""],rootID:root.id) }
+                if manualFull { state.roots[root.id]?.scan=nil;state.enqueue([""],rootID:root.id) }
                 try persistState()
             }
         }
@@ -343,18 +350,53 @@ public final class IndexService: @unchecked Sendable {
                 for root in roots where root.enabled && root.isOnline {
                     if yielding { return }
                     let scopes=try locked { () throws -> [String] in
-                        let scopes=state.roots[root.id]?.pending ?? []
-                        state.roots[root.id]?.pending=[]
-                        state.roots[root.id]?.inFlight=scopes
+                        let active=state.roots[root.id]?.inFlight ?? []
+                        let scopes=active.isEmpty ? (state.roots[root.id]?.pending ?? []) : active
+                        if active.isEmpty {
+                            state.roots[root.id]?.pending=[]
+                            state.roots[root.id]?.inFlight=scopes
+                        } else if !(state.roots[root.id]?.pending.isEmpty ?? true) {
+                            // Drain arrivals already saved behind this cursor.
+                            // New arrivals still use the normal debounce so a
+                            // file changing during extraction cannot busy-loop.
+                            requested=true
+                        }
                         try persistState()
                         return scopes
                     }
                     for scope in scopes {
                         if yielding { return }
-                        emit(scope.isEmpty ? "正在建立文件目录" : "正在更新文件目录",scope.isEmpty ? root.name : scope,busy:true)
+                        let options=ScanOptions(includeHidden:prefs.includeHidden,excludeDevelopmentCaches:prefs.excludeDevelopmentCaches)
+                        let saved=locked {state.roots[root.id]?.scan}
+                        let session:FileScanSession
+                        if let live=scanSessions[root.id],!live.finished,
+                           live.checkpoint.matches(root:root,scope:scope,options:options),
+                           saved?.generation == live.checkpoint.generation {session=live}
+                        else {
+                            session=try FileScanner(database:database,ignoredPaths:ignoredPaths).session(root:root,relativePath:scope,options:options,checkpoint:saved)
+                            scanSessions[root.id]=session
+                        }
+                        emit(scope.isEmpty ? "正在建立文件目录" : "正在更新文件目录",scope.isEmpty ? root.name : scope,count:session.checkpoint.count,busy:true)
                         var contentFailure:Error?
+                        var lastCheckpointWrite=0.0
                         let change=IndexChange(rootID:root.id,relativePaths:[scope],fullRescan:scope.isEmpty)
-                        let result=try FileScanner(database:database,ignoredPaths:ignoredPaths).scan(root:root,relativePath:scope,options:ScanOptions(includeHidden:prefs.includeHidden,excludeDevelopmentCaches:prefs.excludeDevelopmentCaches),cancelled:{self.yielding || contentFailure != nil}) { count in
+                        let result=try session.advance(cancelled:{self.yielding || contentFailure != nil}) { count in
+                            do {
+                                let now=ProcessInfo.processInfo.systemUptime
+                                let finishedTraversal=session.checkpoint.currentDirectory == nil && session.checkpoint.directories.isEmpty
+                                try self.locked {
+                                    self.state.roots[root.id]?.scan=session.checkpoint
+                                    // Keep live progress per batch, but avoid
+                                    // rewriting a wide directory stack dozens
+                                    // of times a second. Suspension/completion
+                                    // always commits; a crash replays the small
+                                    // interval since the last durable checkpoint.
+                                    if now-lastCheckpointWrite >= 1 || self.stopped || self.paused || self.sleeping || self.userActive || self.mutations > 0 || finishedTraversal {
+                                        try self.persistState();lastCheckpointWrite=now
+                                    }
+                                }
+                            }
+                            catch {contentFailure=error;return}
                             guard !self.yielding,contentFailure == nil else { return }
                             self.emit(scope.isEmpty ? "正在建立文件目录" : "正在更新文件目录",scope.isEmpty ? root.name : scope,count:count,busy:true)
                             // The committed ID journal makes a batch refresh
@@ -368,18 +410,20 @@ public final class IndexService: @unchecked Sendable {
                         }
                         if let contentFailure { throw contentFailure }
                         autoreleasepool { self.onIndexChange?(change);self.onChange?() }
-                        if result.complete || (!yielding && !result.errors.isEmpty && VolumeIdentity.refreshed(root).isOnline) {
+                        if session.finished {
                             try locked {
                                 // Incoming events go to a separate inbox while
                                 // this scope is inFlight. A long first scan can
                                 // finish even under continuous file changes.
                                 state.roots[root.id]?.inFlight.removeAll { $0 == scope }
+                                state.roots[root.id]?.scan=nil
                                 if !result.complete {
                                     let pending=state.roots[root.id]?.pending ?? []
                                     state.roots[root.id]?.pending=IndexRelativePath.coalescing(pending + result.preservingPaths)
                                 }
                                 try persistState()
                             }
+                            scanSessions.removeValue(forKey:root.id)
                         }
                         if !result.errors.isEmpty && !yielding { emit("部分位置无法读取",result.errors[0]) }
                         if scope.isEmpty { locked { nextScanAfter=Date().addingTimeInterval(rescanInterval) } }

@@ -296,7 +296,9 @@ final class IndexServiceTests:XCTestCase {
         XCTAssertNil(try db.roots().first?.lastScan)
         try FileManager.default.moveItem(at:away,to:folder)
         service.requestScan()
-        eventually{(try? db.statistics().indexedContent)==1}
+        // Content drains before reconciliation. Wait for the stale metadata
+        // removal too, rather than racing the scanner after content commits.
+        eventually{(try? db.statistics().indexedContent)==1 && (try? db.statistics().files)==1}
         XCTAssertTrue(try XCTUnwrap(db.search("reconnectedcontent").first).root.isOnline)
         XCTAssertEqual(try db.statistics().files,1)
     }

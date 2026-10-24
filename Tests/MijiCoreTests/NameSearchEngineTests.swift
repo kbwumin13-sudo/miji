@@ -218,6 +218,19 @@ final class NameSearchEngineTests: XCTestCase {
         XCTAssertEqual(try e.search("\"foo\0bar\""), [44])
     }
 
+    /// miji_names.c ranks inside a match type: a literal name hit that is the
+    /// whole name or its stem +40, a prefix +20 (ASCII names here, so no pinyin
+    /// prefix bonus); a name loses one point per full 16 bytes, at most 4.
+    private func nameBonus(_ name: String, _ needle: String) -> Int {
+        let n = Array(name.utf8), p = Array(needle.utf8)
+        guard !p.isEmpty, n.starts(with: p) else { return 0 }
+        if n.count == p.count { return 40 }
+        let rest = n[p.count...]
+        if rest.first == 46, rest.count > 1, !rest.dropFirst().contains(46) { return 40 }
+        return 20
+    }
+    private func lengthPenalty(_ name: String) -> Int { min(name.utf8.count, 64) / 16 }
+
     func testLazyASCIIKeysAndScoresMatchLiteralReference() throws {
         let filenames = ["ABCD-efgh.123.txt", "Ab_Cd.pdf", "zzabcdgh.txt", "lecture notes.txt", "a123-007z.txt", "txt", String(repeating: "q", count: 600) + "-word.txt"]
         for (i, name) in filenames.enumerated() { try add(Int64(100 + i), "item\(i)", name: name) }
@@ -229,8 +242,8 @@ final class NameSearchEngineTests: XCTestCase {
         }
         for needle in ["abcd", "cdef", "ae1t", "acp", "cdp", "z", "txt", "-", ".", "_", "999", "notfound", "qw"] {
             let scored = reference.compactMap { row -> (id: Int64, name: String, score: Int)? in
-                let score = (row.name.contains(needle) ? 100 : 0) + (row.full.contains(needle) ? 70 : 0) + (row.initials.contains(needle) ? 70 : 0)
-                return score == 0 ? nil : (row.id, row.name, score)
+                let score = (row.name.contains(needle) ? 100 + nameBonus(row.name, needle) : 0) + (row.full.contains(needle) ? 70 : 0) + (row.initials.contains(needle) ? 70 : 0)
+                return score == 0 ? nil : (row.id, row.name, score - lengthPenalty(row.name))
             }.sorted { $0.score == $1.score ? $0.name < $1.name : $0.score > $1.score }
             XCTAssertEqual(try e.search(needle), scored.map(\.id), needle)
         }
@@ -269,8 +282,9 @@ final class NameSearchEngineTests: XCTestCase {
                     let b = !full.isEmpty && (term.value.isEmpty || full.contains(term.value))
                     let c = !initials.isEmpty && (term.value.isEmpty || initials.contains(term.value))
                     if term.excluded ? (a || b || c) : !(a || b || c) { accepted = false; break }
-                    if !term.excluded { score += (a ? 100 : 0) + (b ? 70 : 0) + (c ? 70 : 0) }
+                    if !term.excluded { score += (a ? 100 + Int32(nameBonus(name, term.value)) : 0) + (b ? 70 : 0) + (c ? 70 : 0) }
                 }
+                if accepted && terms.contains(where: { !$0.excluded }) { score -= Int32(lengthPenalty(name)) }
                 if accepted { expectedIDs.append(UInt32(i)); expectedScores.append(score) }
             }
             var ids: [UInt32] = [], scores: [Int32] = []
@@ -293,7 +307,7 @@ final class NameSearchEngineTests: XCTestCase {
         }) { id, score in
             XCTAssertNotEqual(pthread_equal(thread, pthread_self()), 0)
             XCTAssertEqual(id, UInt32(callbacks))
-            XCTAssertEqual(score, 70)
+            XCTAssertEqual(score, 69)
             callbacks += 1
             if callbacks == 1 { stop = true }
         }) { XCTAssertTrue($0 is CancellationError) }

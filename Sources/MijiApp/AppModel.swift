@@ -103,7 +103,10 @@ final class AppModel: ObservableObject {
         if let engine=nameEngine, searchExecutor == nil {
             let lifetime=lifetimeTicket
             searchQueue.async { [weak self] in
-                do { try engine.load(cancelled:{lifetime.isCancelled}) }
+                do {
+                    try engine.load(cancelled:{lifetime.isCancelled})
+                    Self.completeUpgrade(engine,lifetime:lifetime)
+                }
                 catch { if !lifetime.isCancelled {DispatchQueue.main.async { self?.message="文件名索引加载失败：\(error.localizedDescription)" }} }
             }
         }
@@ -118,7 +121,7 @@ final class AppModel: ObservableObject {
                     }
                     catch {
                         guard !lifetime.isCancelled else {return}
-                        do { try engine.load(cancelled:{lifetime.isCancelled}) }
+                        do { try engine.load(cancelled:{lifetime.isCancelled}); Self.completeUpgrade(engine,lifetime:lifetime) }
                         catch { if !lifetime.isCancelled {DispatchQueue.main.async { self?.message=error.localizedDescription }} }
                     }
                 }
@@ -126,6 +129,11 @@ final class AppModel: ObservableObject {
         }
         refresh()
         if env["MIJI_NO_AUTOSTART"] != "1" { service?.configure(preferences); service?.start() }
+    }
+    /// A cache from an earlier version gets its ranking data off the search
+    /// queue after each load; searching continues meanwhile.
+    private nonisolated static func completeUpgrade(_ engine:NameSearchEngine,lifetime:SearchTicket) {
+        DispatchQueue.global(qos:.utility).async { try? engine.completeUpgrade(cancelled:{lifetime.isCancelled}) }
     }
     func prepareForTermination(completion:@escaping ()->Void) {
         lifetimeTicket.cancel();searchTicket?.cancel();searchWork?.cancel();refreshWork?.cancel();activityWork?.cancel()
@@ -323,9 +331,19 @@ final class AppModel: ObservableObject {
     func openSelected() {
         guard let hit=selected else { return }
         guard hit.root.isOnline, FileManager.default.fileExists(atPath:hit.path) else { message="请连接「\(hit.root.name)」后打开此文件。"; return }
-        if !NSWorkspace.shared.open(URL(fileURLWithPath:hit.path)) { message="未能打开此文件，请检查文件是否仍存在。" }
+        if !NSWorkspace.shared.open(URL(fileURLWithPath:hit.path)) { message="未能打开此文件，请检查文件是否仍存在。"; return }
+        recordOpen(hit.id)
     }
-    func revealSelected() { guard let hit=selected,hit.root.isOnline else { return }; NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath:hit.path)]) }
+    func revealSelected() {
+        guard let hit=selected,hit.root.isOnline else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath:hit.path)])
+        recordOpen(hit.id)
+    }
+    /// Opened results rank higher in later searches (OpenHistory).
+    private func recordOpen(_ id:Int64) {
+        let engine=nameEngine
+        DispatchQueue.global(qos:.utility).async { engine?.recordOpen(id) }
+    }
     func copySelectedPath() { guard let hit=selected else { return }; NSPasteboard.general.clearContents(); NSPasteboard.general.setString(hit.path,forType:.string) }
     func moveSelection(_ step:Int) {
         guard !hits.isEmpty else { return }

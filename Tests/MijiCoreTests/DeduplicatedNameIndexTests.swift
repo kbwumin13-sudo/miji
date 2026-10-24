@@ -71,12 +71,16 @@ final class DeduplicatedNameIndexTests: XCTestCase {
             XCTAssertEqual(try matches(index, terms), try matches(reference, terms),
                            terms.map { ($0.excluded ? "-" : "") + $0.value }.joined(separator: " "))
         }
-        // Check independently recognizable literal, full pinyin and initial scores.
+        // Check independently recognizable literal, full pinyin and initial
+        // scores: a prefix adds 20 to a literal hit and 10 to a Han name's own
+        // pinyin key; the 16-byte name loses 1 for length.
         let cjk = DeduplicatedNameIndex()
         try cjk.append("数学分析.pdf"); try cjk.append("数学分析.pdf")
-        XCTAssertEqual(try matches(cjk, [.init(value: "数学", excluded: false)]).map(\.score), [100, 100])
-        XCTAssertEqual(try matches(cjk, [.init(value: "shuxue", excluded: false)]).map(\.score), [70, 70])
-        XCTAssertEqual(try matches(cjk, [.init(value: "sxfx", excluded: false)]).map(\.score), [70, 70])
+        XCTAssertEqual(try matches(cjk, [.init(value: "数学", excluded: false)]).map(\.score), [119, 119])
+        XCTAssertEqual(try matches(cjk, [.init(value: "shuxue", excluded: false)]).map(\.score), [79, 79])
+        XCTAssertEqual(try matches(cjk, [.init(value: "sxfx", excluded: false)]).map(\.score), [79, 79])
+        XCTAssertEqual(try matches(cjk, [.init(value: "分析", excluded: false)]).map(\.score), [99, 99])
+        XCTAssertEqual(try matches(cjk, [.init(value: "数学分析", excluded: false)]).map(\.score), [139, 139], "主名完全一致")
     }
 
     func testNameEqualityAndBinaryComparisonUseOriginalRowsIncludingNULAndUnicode() throws {
@@ -203,7 +207,7 @@ final class DeduplicatedNameIndexTests: XCTestCase {
             return stop
         }) { id, score in
             XCTAssertNotEqual(pthread_equal(caller, pthread_self()), 0)
-            XCTAssertEqual(id, UInt32(callbacks)); XCTAssertEqual(score, 70)
+            XCTAssertEqual(id, UInt32(callbacks)); XCTAssertEqual(score, 69)
             callbacks += 1; stop = true
         }) { XCTAssertTrue($0 is CancellationError) }
         XCTAssertEqual(callbacks, 4096)

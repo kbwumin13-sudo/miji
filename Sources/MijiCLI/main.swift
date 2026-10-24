@@ -37,6 +37,7 @@ do {
         let started=DispatchTime.now().uptimeNanoseconds
         try engine.load()
         let loadMS=Double(DispatchTime.now().uptimeNanoseconds-started)/1_000_000
+        try engine.completeUpgrade()
         let queries=option("--queries")?.components(separatedBy:"|") ?? ["数学","数学分析","Miji","README","pdf","shuxue","sx","不存在的文件-zz981"]
         let rounds=max(1,Int(option("--rounds") ?? "20") ?? 20)
         var results:[[String:Any]]=[]

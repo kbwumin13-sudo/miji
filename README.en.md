@@ -38,6 +38,7 @@ Press `⌃⌥Space`, type `sxfx` to open your 数学分析 (mathematical analysi
 - **The whole Mac by default**: indexing starts at `/`, including system folders, hidden files and Library; app bundles and document packages count as single items.
 - **Unplugged drives stay searchable**: each external drive is indexed separately by volume UUID. After you disconnect it, names, text and labels remain on your Mac and results are marked 未连接 (offline); reconnecting restores the drive even if its mount path changed.
 - **Results while you type**: name matches appear first, content matches stream in, and stale queries are cancelled as soon as you keep typing or close the panel.
+- **Your files first**: exact and prefix matches rank higher, your own files come before Library, system and dependency folders, and files you recently opened from Miji move up.
 - **Only changes get rescanned**: a persistent FSEvents cursor limits rescans to changed paths and replays history after a restart; a full rescan happens only if events were lost.
 - **One bad file never stalls the index**: OCR, PDF and iWork parsing run file by file in a bundled helper process; any file that takes longer than 180 seconds is stopped and logged while indexing moves on.
 
@@ -50,7 +51,7 @@ Press `⌃⌥Space`, type `sxfx` to open your 数学分析 (mathematical analysi
 
 ## Quick start
 
-1. Download `Miji-1.1.0-macOS-arm64.zip` from [Releases](https://github.com/kbwumin13-sudo/miji/releases/latest), unzip it and drag 觅迹.app into Applications.
+1. Download `Miji-1.1.5-macOS-arm64.zip` from [Releases](https://github.com/kbwumin13-sudo/miji/releases/latest), unzip it and drag 觅迹.app into Applications.
 2. Miji is ad-hoc signed and not yet notarized, so macOS refuses the first launch, saying either that the developer cannot be verified or that the app "is damaged". Run the command below and open it again. If macOS only says it cannot verify the developer, you can instead try opening the app once, then click **Open Anyway** at the bottom of System Settings → Privacy & Security.
 
    ```sh
@@ -107,7 +108,7 @@ Per-file limits: 64 MiB of input, 8 MiB of extracted text, 128 MiB of total ZIP 
 
 ## Performance
 
-Measured on an Apple M5 (16 GB RAM) against 2,479,232 real file names, 20 runs per query, P95 of name matching plus reading the results:
+Measured with 1.1.0 on an Apple M5 (16 GB RAM) against 2,479,232 real file names, 20 runs per query, P95 of name matching plus reading the results:
 
 | Query | Kind | P95 |
 | --- | --- | ---: |
@@ -119,9 +120,10 @@ Measured on an Apple M5 (16 GB RAM) against 2,479,232 real file names, 20 runs p
 | `README` | English | 77.5 ms |
 
 - **86% smaller index**: 1.1.0 deduplicates extracted text by SHA-256, compresses it losslessly with LZFSE, and stops storing text a second time inside the full-text index. The same index shrank from 51.07 GB to 7.28 GB; all 840,123 extracted records were verified one by one during the migration.
-- **Ready after restart**: the name index snapshot restores in about 250 ms, with no rescan.
-- **Memory**: the main process uses about 200–260 MiB; OCR and document parsing run in per-file helpers that are not included in that figure.
-- **Broad full-text queries** take longer to verify and rank: usually 1–15 seconds, and very common words such as `README` can exceed 30 seconds. Name results and verified content matches appear first.
+- **Ready after restart**: the name index cache is mapped straight into memory; 3.54 million files restore in about 0.2–0.6 seconds, with no rescan.
+- **Memory**: on an index of 3.54 million files, the 1.1.5 main process stays at about 25–50 MB (233–373 MB in 1.1.4); OCR and document parsing run in per-file helpers that are not included in that figure.
+- **Lighter scanning**: 1.1.5 makes fewer system calls per item, cutting scan CPU time to a quarter to a third for the same folder tree with identical results.
+- **Broad full-text queries**: sorted by relevance, verification stops once a page of 500 matches is full. Common words such as 数学 or 报告 take about 1–8 seconds; very common words such as `README` or `OCR` can still exceed 10 seconds. Name results and verified content matches appear first.
 
 ## How it works
 
@@ -157,7 +159,7 @@ bash scripts/package.sh                                      # Release build, si
 python3 scripts/e2e-check.py --cli .build/release/miji-cli   # End-to-end check
 ```
 
-Before the 1.1.0 release, all 127 Core tests (one large benchmark is skipped by default) and 4 App tests passed, and the release CLI passed 52/52 end-to-end checks covering OCR, PDF, DOCX, pinyin and filter syntax, plus offline and reconnect behavior of external drives simulated with APFS disk images.
+Before the 1.1.5 release, all 181 Core tests (one large benchmark is skipped by default) and 7 App tests passed, and the release CLI passed 52/52 end-to-end checks covering OCR, PDF, DOCX, pinyin and filter syntax, plus offline and reconnect behavior of external drives simulated with APFS disk images.
 
 ## Limitations
 

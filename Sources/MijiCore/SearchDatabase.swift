@@ -286,7 +286,7 @@ public final class SearchDatabase: @unchecked Sendable {
             defer { sqlite3_finalize(statement) }
             try bind([.integer(fileID)], to: statement)
             guard try next(statement) else { return nil }
-            return try decoder.decode(ExtractedContent.self, from: ContentCodec.unpack(blob(statement, 0)))
+            return try ContentCodec.content(ContentCodec.unpack(blob(statement, 0)), decoder: decoder)
         }
     }
 
@@ -326,7 +326,7 @@ public final class SearchDatabase: @unchecked Sendable {
         let statement = try prepare("SELECT b.packed FROM content_blobs b JOIN files f ON f.content_id=b.id WHERE f.id=?")
         defer { sqlite3_finalize(statement) }
         try bind([.integer(fileID)], to: statement)
-        return try next(statement) ? decoder.decode(ExtractedContent.self, from: ContentCodec.unpack(blob(statement, 0))) : nil
+        return try next(statement) ? ContentCodec.content(ContentCodec.unpack(blob(statement, 0)), decoder: decoder) : nil
     }
 
     public func statistics() throws -> IndexStatistics {
@@ -387,14 +387,9 @@ public final class SearchDatabase: @unchecked Sendable {
             let hanTerms = !textTerms.isEmpty && textTerms.allSatisfy {
                 !$0.value.isEmpty && $0.value.unicodeScalars.allSatisfy { (0x3400...0x9fff).contains($0.value) }
             }
-            func queryBody(_ raw:String)->String {
-                if textTerms.isEmpty {return ""}
-                if hanTerms && textTerms.allSatisfy({raw.contains($0.value)}) {return raw}
-                return QueryParser.normalize(raw)
-            }
             // Rank metadata first. Building snippets for every match can dwarf
             // the index lookup when only the best 500 will ever be displayed.
-            typealias Candidate=(SearchHit,Int,Int64?,String)
+            typealias Candidate=(SearchHit,Int,Int64?,String,tier:Int,nameHit:Bool)
             var hits: [Candidate] = []
             var seen = Set<Int64>()
             func better(_ left:Candidate,_ right:Candidate) -> Bool {
@@ -407,69 +402,89 @@ public final class SearchDatabase: @unchecked Sendable {
                 let a=left.3,b=right.3
                 return a == b ? left.0.id < right.0.id : a < b
             }
+            /// How a relevance page of body hits is shown: files whose name also
+            /// matched, then the user's own files (locationTier), newest first.
+            func shown(_ left:Candidate,_ right:Candidate) -> Bool {
+                if left.nameHit != right.nameHit { return left.nameHit }
+                if left.tier != right.tier { return left.tier < right.tier }
+                if left.0.file.modified != right.0.file.modified { return left.0.file.modified > right.0.file.modified }
+                return left.0.id < right.0.id
+            }
             var rootCache: [String: IndexedRoot] = [:]
             var contentCacheID: Int64 = -1
-            var cachedContent: ExtractedContent?
-            var cachedBody = "", cachedLabels = ""
+            var cachedTerms: [(body: Bool, labels: Bool)] = []
             var lastPartial=Date.distantPast
-            func collect(_ predicates: [String], _ values: [Value], readBody: Bool) throws {
-                var sql = "SELECT \(Self.fileColumns),r.payload,f.name_search,f.pinyin_search,f.initials_search,f.content_id FROM files f JOIN roots r ON r.id=f.root_id"
-                if !predicates.isEmpty { sql += " WHERE " + predicates.joined(separator: " AND ") }
-                // Group identical bodies so one decompression can serve copies.
-                sql += readBody ? " ORDER BY f.content_id,f.id" : " ORDER BY f.id"
-                let statement = try prepare(sql)
-                defer { sqlite3_finalize(statement) }
-                try bind(values, to: statement)
-                while try next(statement) {
+            /// Candidates come grouped by body, so one decompression serves
+            /// every copy. Without `stopAt` every candidate is ranked; with it
+            /// the pass ends once that many hits are verified, so a broad body
+            /// query reads a page of bodies instead of all of them, newest
+            /// stored bodies first (descending the same index).
+            func collect(_ predicates: [String], _ values: [Value], readBody: Bool, stopAt: Int? = nil) throws {
+                let columns = "\(Self.fileColumns),r.payload,f.name_search,f.pinyin_search,f.initials_search,f.content_id,\(Self.locationTier("f"))"
+                let filter = predicates.isEmpty ? "" : " WHERE " + predicates.joined(separator: " AND ")
+                /// One candidate row; false once the page is full.
+                func consider(_ statement: OpaquePointer) throws -> Bool {
                     if cancelled() { throw CancellationError() }
                     let id = sqlite3_column_int64(statement, 0)
-                    if seen.contains(id) { continue }
+                    if seen.contains(id) { return true }
                     let name = text(statement, 13), pinyin = text(statement, 14), initials = text(statement, 15)
-                    var body = "", labels = ""
+                    var found: [(body: Bool, labels: Bool)] = []
                     if readBody && !textTerms.isEmpty {
                         let contentID = sqlite3_column_int64(statement, 16)
                         if contentID != contentCacheID {
-                            cachedContent = try contentUnlocked(fileID: id)
-                            cachedBody = queryBody(cachedContent?.text ?? "")
-                            cachedLabels = QueryParser.normalize(cachedContent?.labels.joined(separator: "\n") ?? "")
+                            let content = try contentUnlocked(fileID: id)
+                            let body = Self.bodyHits(content?.text ?? "", textTerms.map(\.value), hanTerms: hanTerms)
+                            let labels = QueryParser.normalize(content?.labels.joined(separator: "\n") ?? "")
+                            cachedTerms = textTerms.indices.map { (body[$0], labels.contains(textTerms[$0].value)) }
                             contentCacheID = contentID
                         }
-                        body = cachedBody; labels = cachedLabels
+                        found = cachedTerms
                     }
                     var score = 0
-                    var matches = true
-                    for term in textTerms {
+                    var matches = true, nameHit = false
+                    for (index, term) in textTerms.enumerated() {
+                        let inBody = !found.isEmpty && found[index].body, inLabels = !found.isEmpty && found[index].labels
                         let nameMatch = options.scope != .content && (name.contains(term.value) || pinyin.contains(term.value) || initials.contains(term.value))
-                        let bodyMatch = options.scope != .name && (body.contains(term.value) || labels.contains(term.value))
+                        if nameMatch && !term.isExcluded { nameHit = true }
+                        let bodyMatch = options.scope != .name && (inBody || inLabels)
                         if term.isExcluded ? (nameMatch || bodyMatch) : !(nameMatch || bodyMatch) { matches = false; break }
                         if !term.isExcluded {
                             if name.contains(term.value) && options.scope != .content { score += 100 }
                             else if nameMatch { score += 70 }
-                            if labels.contains(term.value) && options.scope != .name { score += 35 }
-                            if body.contains(term.value) && options.scope != .name { score += 20 }
+                            if inLabels && options.scope != .name { score += 35 }
+                            if inBody && options.scope != .name { score += 20 }
                         }
                     }
-                    guard matches else { continue }
+                    guard matches else { return true }
                     let file = fileRecord(statement)
                     let root: IndexedRoot
                     if let cached = rootCache[file.rootID] { root = cached }
                     else { root = try decode(IndexedRoot.self, text(statement, 12)); rootCache[file.rootID] = root }
                     let bodyID=readBody && sqlite3_column_type(statement,16) != SQLITE_NULL ? sqlite3_column_int64(statement,16) : nil
-                    hits.append((SearchHit(file:file,root:root,snippet:"",matchedIn:readBody ? "内容" : "文件名",labels:""),score,bodyID,name))
+                    hits.append((SearchHit(file:file,root:root,snippet:"",matchedIn:readBody ? "内容" : "文件名",labels:""),score,bodyID,name,
+                                 tier:Int(sqlite3_column_int(statement,17)),nameHit:nameHit))
+                    if let stopAt, hits.count >= stopAt { return false }
                     // A broad body query can match hundreds of thousands of
                     // paths. Keep only a bounded top set, not every snippet.
-                    if hits.count > max(256,options.limit*2) {
+                    if stopAt == nil, hits.count > max(256,options.limit*2) {
                         hits.sort(by:better)
                         hits.removeLast(hits.count-options.limit)
                     }
                     if let onPartial,Date().timeIntervalSince(lastPartial)>=0.25 {
                         // Every emitted hit has passed all exact predicates.
                         // Continue ranking and add selected snippets at completion.
-                        onPartial(hits.sorted(by:better).prefix(options.limit).map(\.0))
+                        onPartial(hits.sorted(by:stopAt == nil ? better : shown).prefix(options.limit).map(\.0))
                         lastPartial=Date()
                     }
+                    return true
                 }
+                let order = !readBody ? "f.id" : stopAt == nil ? "f.content_id,f.id" : "f.content_id DESC,f.id"
+                let statement = try prepare("SELECT \(columns) FROM files f JOIN roots r ON r.id=f.root_id\(filter) ORDER BY " + order)
+                defer { sqlite3_finalize(statement) }
+                try bind(values, to: statement)
+                while try next(statement), try consider(statement) {}
             }
+            var bodyPaged = false
             if includeNames && options.scope != .content {
                 var nameFilters = filters, nameValues = filterValues
                 for term in positive {
@@ -490,37 +505,170 @@ public final class SearchDatabase: @unchecked Sendable {
                     bodyFilters.append("f.content_id IN (SELECT rowid FROM content_fts WHERE content_fts MATCH ?)")
                     bodyValues.append(.string(expressions.map { "(" + $0 + ")" }.joined(separator: joiner)))
                 } else { bodyFilters.append("f.content_id IS NOT NULL") }
-                try collect(bodyFilters, bodyValues, readBody: true)
+                if options.sort == .relevance {
+                    // A relevance page needs no global rank of every body:
+                    // stop once it is full, then show it by shown(). Date,
+                    // size and name orders still check every candidate.
+                    let nameHits = hits.count
+                    try collect(bodyFilters, bodyValues, readBody: true, stopAt: options.limit)
+                    hits[nameHits...].sort(by: shown)
+                    bodyPaged = true
+                } else {
+                    try collect(bodyFilters, bodyValues, readBody: true)
+                }
             }
             if cancelled() { throw CancellationError() }
-            hits.sort(by:better)
+            // Name hits keep their rank ahead of a relevance page of bodies.
+            if !bodyPaged { hits.sort(by:better) }
             // Read each selected shared body once, then restore result rank.
             let selected=Array(hits.prefix(options.limit))
             var decorated=[SearchHit?](repeating:nil,count:selected.count)
             let selectedBodies=try prepare("SELECT packed FROM content_blobs WHERE id=?")
             defer {sqlite3_finalize(selectedBodies)}
-            var previousBody:Int64?,content:ExtractedContent?,body="",labels="",snippet=""
+            var previousBody:Int64?,content:ExtractedContent?,bodyTerms:[String]=[],labels="",snippet=""
             for index in selected.indices.sorted(by:{(selected[$0].2 ?? -1)<(selected[$1].2 ?? -1)}) {
                 if cancelled() {throw CancellationError()}
                 let candidate=selected[index]
                 if candidate.2 != previousBody {
-                    content=nil;body="";labels="";snippet=""
+                    content=nil;bodyTerms=[];labels="";snippet=""
                     if let id=candidate.2 {
                         sqlite3_reset(selectedBodies);sqlite3_clear_bindings(selectedBodies)
                         try bind([.integer(id)],to:selectedBodies)
                         if try next(selectedBodies) {
-                            content=try decoder.decode(ExtractedContent.self,from:ContentCodec.unpack(blob(selectedBodies,0)))
-                            body=queryBody(content?.text ?? "")
+                            content=try ContentCodec.content(ContentCodec.unpack(blob(selectedBodies,0)),decoder:decoder)
+                            // The candidate pass's check, not another scan of the body per term.
+                            let found=textTerms.isEmpty ? [] : Self.bodyHits(content?.text ?? "",textTerms.map(\.value),hanTerms:hanTerms)
+                            bodyTerms=textTerms.indices.filter {!textTerms[$0].isExcluded && found[$0]}.map {textTerms[$0].value}
                             labels=QueryParser.normalize(content?.labels.joined(separator:"\n") ?? "")
-                            snippet=Self.snippet(content?.text ?? "",matching:positive.map(\.value).filter{body.contains($0)})
+                            snippet=Self.snippet(content?.text ?? "",matching:bodyTerms)
                         }
                     }
                     previousBody=candidate.2
                 }
-                decorated[index]=Self.hit(file:candidate.0.file,root:candidate.0.root,content:content,terms:terms,scope:options.scope,normalizedBody:body,normalizedLabels:labels,cachedSnippet:snippet)
+                decorated[index]=Self.hit(file:candidate.0.file,root:candidate.0.root,content:content,terms:terms,scope:options.scope,bodyTerms:bodyTerms,normalizedLabels:labels,cachedSnippet:snippet)
             }
             return decorated.compactMap{$0}
         }
+    }
+
+    /// Whether each normalized term occurs in a body, as Foundation's `contains`
+    /// on the body decides (the raw body when Han terms all occur in it
+    /// literally, the normalized body otherwise): whole characters (grapheme
+    /// clusters), without a character walk over every body. Pure ASCII text
+    /// normalizes to its lowercase. A byte match counts when both of its ends
+    /// are character boundaries; where that is not certain, Foundation decides.
+    static func bodyHits(_ text: String, _ terms: [String], hanTerms: Bool) -> [Bool] {
+        var raw = text
+        return raw.withUTF8 { source -> [Bool] in
+            var hits = [Bool](repeating: false, count: terms.count)
+            if hanTerms {
+                for (i, term) in terms.enumerated() {
+                    switch characterMatch(term, in: source) {
+                    case true?: hits[i] = true
+                    case false?: hits[i] = false
+                    case nil: hits[i] = text.contains(term)
+                    }
+                }
+                if hits.allSatisfy({ $0 }) { return hits }
+            }
+            func check(_ normalized: UnsafeBufferPointer<UInt8>, _ string: () -> String) {
+                for (i, term) in terms.enumerated() where !hits[i] {
+                    hits[i] = characterMatch(term, in: normalized) ?? string().contains(term)
+                }
+            }
+            if source.allSatisfy({ $0 < 128 }) {
+                let lowered = source.map { $0 >= 65 && $0 <= 90 ? $0 + 32 : $0 }
+                lowered.withUnsafeBufferPointer { bytes in check(bytes) { String(decoding: bytes, as: UTF8.self) } }
+            } else {
+                var normalized = QueryParser.normalize(text)
+                let copy = normalized
+                normalized.withUTF8 { bytes in check(bytes) { copy } }
+            }
+            return hits
+        }
+    }
+
+    /// Some occurrence of `term` in `bytes` starts and ends on character
+    /// boundaries (true), none does (false), or a boundary is not certain (nil).
+    static func characterMatch(_ term: String, in bytes: UnsafeBufferPointer<UInt8>) -> Bool? {
+        var needle = term
+        return needle.withUTF8 { key -> Bool? in
+            guard !key.isEmpty else { return true }
+            /// Foundation's NFC leaves a syllable followed by a trailing jamo
+            /// uncomposed, while Swift compares it as the composed syllable, so
+            /// no byte match is not a miss where a Hangul term meets that form.
+            func missed() -> Bool? {
+                func jamo(_ b: UnsafeBufferPointer<UInt8>) -> Bool {
+                    var i = 0
+                    while i + 2 < b.count {
+                        switch (b[i], b[i + 1]) {
+                        case (0xE1, 0x84...0x87): return true                       // U+1100-11FF
+                        case (0xEA, 0xA5) where b[i + 2] >= 0xA0: return true       // U+A960-A97F
+                        case (0xED, 0x9E) where b[i + 2] >= 0xB0, (0xED, 0x9F): return true // U+D7B0-D7FF
+                        default: i += 1
+                        }
+                    }
+                    return false
+                }
+                let hangul = term.unicodeScalars.contains {
+                    (0x1100...0x11FF).contains($0.value) || (0xA960...0xA97F).contains($0.value) || (0xAC00...0xD7FF).contains($0.value)
+                }
+                return hangul && (jamo(key) || jamo(bytes)) ? nil : false
+            }
+            guard key.count <= bytes.count, let base = bytes.baseAddress else { return missed() }
+            var from = 0, uncertain = false
+            while from <= bytes.count - key.count,
+                  let found = memmem(base + from, bytes.count - from, key.baseAddress!, key.count) {
+                let start = base.distance(to: found.assumingMemoryBound(to: UInt8.self))
+                switch (characterBoundary(bytes, start), characterBoundary(bytes, start + key.count)) {
+                case (true?, true?): return true
+                case (false?, _), (_, false?): break
+                default: uncertain = true
+                }
+                from = start + 1
+            }
+            return uncertain ? nil : missed()
+        }
+    }
+
+    /// A grapheme cluster boundary at a scalar boundary of valid UTF-8 (UAX #29),
+    /// decided only where the rules are unambiguous; nil otherwise.
+    static func characterBoundary(_ bytes: UnsafeBufferPointer<UInt8>, _ position: Int) -> Bool? {
+        if position == 0 || position == bytes.count { return true }
+        func scalar(at index: Int) -> Unicode.Scalar? {
+            var iterator = UnsafeBufferPointer(rebasing: bytes[index...]).makeIterator()
+            var decoder = UTF8()
+            if case .scalarValue(let value) = decoder.decode(&iterator) { return value }
+            return nil
+        }
+        var lead = position - 1
+        while lead > 0 && bytes[lead] & 0xC0 == 0x80 { lead -= 1 }
+        guard let before = scalar(at: lead), let after = scalar(at: position) else { return nil }
+        func regional(_ s: Unicode.Scalar) -> Bool { (0x1F1E6...0x1F1FF).contains(s.value) }
+        func jamo(_ s: Unicode.Scalar) -> Bool {
+            (0x1100...0x11FF).contains(s.value) || (0xA960...0xA97F).contains(s.value) || (0xD7B0...0xD7FF).contains(s.value)
+        }
+        func prepend(_ s: Unicode.Scalar) -> Bool {
+            [0x0600...0x0605, 0x06DD...0x06DD, 0x070F...0x070F, 0x0890...0x0891, 0x08E2...0x08E2, 0x0D4E...0x0D4E,
+             0x110BD...0x110BD, 0x110CD...0x110CD, 0x111C2...0x111C3, 0x1193F...0x1193F, 0x11941...0x11941,
+             0x11A3A...0x11A3A, 0x11A84...0x11A89, 0x11D46...0x11D46, 0x11F02...0x11F02].contains { $0.contains(s.value) }
+        }
+        let syllable: (Unicode.Scalar) -> Bool = { (0xAC00...0xD7A3).contains($0.value) }
+        if before.value == 0x0D && after.value == 0x0A { return false }                     // GB3
+        if before.properties.generalCategory == .control || after.properties.generalCategory == .control { return true } // GB4, GB5
+        let category = before.properties.generalCategory
+        if category == .format || category == .lineSeparator || category == .paragraphSeparator,
+           before.value != 0x200C, before.value != 0x200D {
+            // Controls too, apart from extenders (tags) and prepended marks.
+            return before.properties.isGraphemeExtend || prepend(before) ? nil : true       // GB4
+        }
+        if after.properties.isGraphemeExtend || after.properties.isEmojiModifier || after.value == 0x200D { return false } // GB9
+        if after.properties.generalCategory == .spacingMark
+            || after.value == 0x0E33 || after.value == 0x0EB3 { return nil }               // GB9a (Thai and Lao AM are Lo)
+        if before.properties.isGraphemeExtend || before.properties.isEmojiModifier { return nil } // GB9c conjuncts
+        if before.value == 0x200D || prepend(before) || (regional(before) && regional(after))
+            || jamo(before) || jamo(after) || (syllable(before) && jamo(after)) { return nil } // GB9b, GB11, GB12-13, GB6-8
+        return true                                                                         // GB999
     }
 
     private final class SearchCancellationContext {
@@ -529,10 +677,9 @@ public final class SearchDatabase: @unchecked Sendable {
     }
 
     private static func hit(file: FileRecord, root: IndexedRoot, content: ExtractedContent?, terms: [QueryTerm], scope: SearchScope,
-                            normalizedBody:String?=nil,normalizedLabels:String?=nil,cachedSnippet:String?=nil) -> SearchHit {
+                            bodyTerms:[String],normalizedLabels:String?=nil,cachedSnippet:String?=nil) -> SearchHit {
         let positive = terms.filter { $0.field == .text && !$0.isExcluded }.map(\.value)
         let name = QueryParser.normalize(file.name)
-        let body = normalizedBody ?? QueryParser.normalize(content?.text ?? "")
         let labels = content?.labels.joined(separator: "、") ?? ""
         let labelSearch = normalizedLabels ?? QueryParser.normalize(content?.labels.joined(separator: "\n") ?? "")
         var locations: [String] = []
@@ -544,7 +691,7 @@ public final class SearchDatabase: @unchecked Sendable {
             }
             if matchesName { locations.append("文件名") }
         }
-        let bodyTerms = scope == .name ? [] : positive.filter { body.contains($0) }
+        let bodyTerms = scope == .name ? [] : bodyTerms
         if !bodyTerms.isEmpty { locations.append("正文") }
         if scope != .name && positive.contains(where: { labelSearch.contains($0) }) { locations.append("图片标签") }
         if locations.isEmpty { locations.append(terms.contains(where: { $0.field == .path && !$0.isExcluded }) ? "路径" : "文件名") }
@@ -596,6 +743,18 @@ public final class SearchDatabase: @unchecked Sendable {
         FROM files INDEXED BY files_pending
         """
 
+    /// Where a file lives, for ranking: 1 under hidden folders, Library and
+    /// caches, system trees and dependency folders; 0 elsewhere, which is
+    /// where the user's own files are. `table` is the alias of `files`.
+    static func locationTier(_ table: String) -> String {
+        // Core columns only (the name engine reads no derived ones). LIKE
+        // ignores ASCII case, so no lower() copy per row.
+        let path = "('/'||\(table).relative_path)"
+        let inside = ["/.", "/library/", "/caches/", "/node\\_modules/", "/site-packages/", "/deriveddata/", "/pods/"]
+            .map { "\(path) LIKE '%\($0)%' ESCAPE '\\'" }
+        let roots = ["system/", "usr/", "opt/", "private/", "bin/", "sbin/", "cores/"].map { "\(table).relative_path LIKE '\($0)%'" }
+        return "(CASE WHEN " + (inside + roots).joined(separator: " OR ") + " THEN 1 ELSE 0 END)"
+    }
     private static let signaturePredicate = "id=? AND root_id=? AND relative_path=? AND size=? AND modified=? AND inode=?"
     private static let fileColumns = "f.id,f.root_id,f.relative_path,f.name,f.extension,f.kind,f.size,f.modified,f.inode,f.content_state,f.content_error,f.generation"
 

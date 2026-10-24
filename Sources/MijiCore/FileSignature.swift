@@ -7,17 +7,22 @@ public struct FileSignature: Equatable {
     public var modified: Double
     public var inode: Int64
     private static func metadata(_ url:URL) throws -> (signature:FileSignature,isDirectory:Bool,isRegular:Bool) {
+        let entry=try metadata(path:url.path)
+        return (entry.signature,entry.isDirectory,entry.isRegular)
+    }
+    /// lstat only: the caller has already resolved the path, as `read` does.
+    static func metadata(path:String) throws -> (signature:FileSignature,isDirectory:Bool,isRegular:Bool,flags:UInt32) {
         var info=stat()
-        guard lstat(url.path,&info) == 0 else {
+        guard lstat(path,&info) == 0 else {
             let code=errno
-            throw NSError(domain:NSPOSIXErrorDomain,code:Int(code),userInfo:[NSFilePathErrorKey:url.path])
+            throw NSError(domain:NSPOSIXErrorDomain,code:Int(code),userInfo:[NSFilePathErrorKey:path])
         }
         // FileManager.attributesOfItem also reads extended attributes. Those
         // can wait on a provider or protected file and hold up the entire index.
         // Round through Date just as Foundation did, preserving stored signatures.
         let seconds=Double(info.st_mtimespec.tv_sec)-Date.timeIntervalBetween1970AndReferenceDate+Double(info.st_mtimespec.tv_nsec)/1_000_000_000
         let signature=FileSignature(size:info.st_size,modified:Date(timeIntervalSinceReferenceDate:seconds).timeIntervalSince1970,inode:Int64(bitPattern:UInt64(info.st_ino)))
-        return (signature,info.st_mode & S_IFMT == S_IFDIR,info.st_mode & S_IFMT == S_IFREG)
+        return (signature,info.st_mode & S_IFMT == S_IFDIR,info.st_mode & S_IFMT == S_IFREG,info.st_flags)
     }
     public static func read(_ url: URL) throws -> FileSignature {
         let url=url.standardizedFileURL.resolvingSymlinksInPath()

@@ -28,9 +28,12 @@ struct IndexPathFilter {
         for component in missing.reversed() { candidate=candidate.appendingPathComponent(component) }
         return candidate.standardizedFileURL.path
     }
-    func ignores(_ path: String) -> Bool {
-        let path = Self.canonicalPath(path)
-        return ignoredPaths.contains { ignored in
+    var isEmpty: Bool { ignoredPaths.isEmpty && sidecarPaths.isEmpty }
+    func ignores(_ path: String) -> Bool { ignores(canonical: Self.canonicalPath(path)) }
+    /// For a path already in canonicalPath form, such as a canonical directory
+    /// joined with the name of a child that is not a symbolic link.
+    func ignores(canonical path: String) -> Bool {
+        ignoredPaths.contains { ignored in
             path == ignored || path.hasPrefix(ignored == "/" ? "/" : ignored + "/")
         } || sidecarPaths.contains { ignored in
             ["-wal", "-shm", "-journal"].contains { path == ignored + $0 }

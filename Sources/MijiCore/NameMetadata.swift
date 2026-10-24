@@ -75,12 +75,23 @@ final class NameMetadataReader {
 
 /// Structure-of-arrays metadata, plus a small map only for rows changed since load.
 /// No FileRecord objects, bodies, root JSON or per-file Swift path strings.
+/// Restored from a mapped cache, the columns are file pages read in place.
 final class NameSnapshot {
-    static let columns = "id,root_id,name,extension,kind,size,modified"
+    /// Selected per row from `files` under alias `table`, in upsert's order.
+    static func columns(_ table: String) -> String {
+        ["id","root_id","name","extension","kind","size","modified"].map { "\(table).\($0)" }.joined(separator: ",")
+            + "," + SearchDatabase.locationTier(table)
+    }
     var core = DeduplicatedNameIndex()
-    var ids: [Int64] = [], sizes: [Int64] = [], modified: [Double] = []
-    var roots: [UInt32] = [], extensions: [UInt32] = [], kinds: [UInt32] = []
-    var live: [UInt8] = []
+    var ids = MappedColumn<Int64>(), sizes = MappedColumn<Int64>(), modified = MappedColumn<Double>()
+    var roots = MappedColumn<UInt32>(), extensions = MappedColumn<UInt32>(), kinds = MappedColumn<UInt32>()
+    var live = MappedColumn<UInt8>()
+    /// SearchDatabase.locationTier of each row, for ranking.
+    var tiers = MappedColumn<UInt8>()
+    /// Restored from a mapped cache rather than built in memory.
+    var isMapped = false
+    /// Restored from a cache that predates tiers; they are all zero until filled.
+    var needsTiers = false
     var rootKeys: [String: UInt32] = [:], extensionKeys: [String: UInt32] = [:], kindKeys: [String: UInt32] = [:]
     var baseCount = 0
     var changedIDs: [Int64: UInt32] = [:]
@@ -116,10 +127,11 @@ final class NameSnapshot {
         let ext = intern(QueryParser.normalize(reader.text(row, 3)), &extensionKeys)
         let kind = intern(reader.text(row, 4), &kindKeys)
         let size = sqlite3_column_int64(row, 5), date = sqlite3_column_double(row, 6)
+        let tier = UInt8(clamping: sqlite3_column_int(row, 7))
         if incremental, let old = index(id), live[Int(old)] != 0 {
             if core.nameEquals(old, name) {
                 let i = Int(old)
-                roots[i] = root; extensions[i] = ext; kinds[i] = kind; sizes[i] = size; modified[i] = date
+                roots[i] = root; extensions[i] = ext; kinds[i] = kind; sizes[i] = size; modified[i] = date; tiers[i] = tier
                 return
             }
             remove(old)
@@ -127,7 +139,7 @@ final class NameSnapshot {
         try core.append(name)
         let i = UInt32(ids.count)
         ids.append(id); roots.append(root); extensions.append(ext); kinds.append(kind)
-        sizes.append(size); modified.append(date); live.append(1); liveCount += 1
+        sizes.append(size); modified.append(date); live.append(1); tiers.append(tier); liveCount += 1
         if incremental { changedIDs[id] = i }
     }
 }

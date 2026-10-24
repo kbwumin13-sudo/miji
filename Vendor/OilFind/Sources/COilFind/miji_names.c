@@ -33,6 +33,19 @@ static int ascii_full_contains(const uint8_t *name, size_t len, const MijiNameTe
     return 0;
 }
 
+/* Rank inside a match type. A literal name hit that is the whole name, or the
+ * name less one trailing extension, scores +40; one at the start +20. A Han
+ * (non-ASCII) name whose own pinyin or initials key starts with the term +10.
+ * Longer names lose up to 4, so ties go to the shorter name. */
+static int32_t name_bonus(const uint8_t *name, size_t len, const MijiNameTerm *t) {
+    if (!t->length || !sift_has_prefix(name, len, t->needle, t->length, 1)) return 0;
+    if (len == t->length) return 40;
+    const uint8_t *rest = name + t->length;
+    size_t left = len - t->length;
+    if (rest[0] == '.' && left > 1 && !memchr(rest + 1, '.', left - 1)) return 40;
+    return 20;
+}
+
 size_t miji_match_names(const uint8_t *names, const uint32_t *name_off,
                         const uint8_t *full, const uint32_t *full_off,
                         const uint8_t *initials, const uint32_t *initial_off,
@@ -41,7 +54,8 @@ size_t miji_match_names(const uint8_t *names, const uint32_t *name_off,
                         uint32_t first, uint32_t end,
                         const MijiNameTerm *terms, size_t term_count,
                         uint32_t *ids, int32_t *scores) {
-    size_t count = 0;
+    size_t count = 0, positive = 0;
+    for (size_t j = 0; j < term_count; j++) positive += !terms[j].excluded;
     for (uint32_t i = first; i < end; i++) {
         if (!live[i]) continue;
         int32_t score = 0;
@@ -61,9 +75,20 @@ size_t miji_match_names(const uint8_t *names, const uint32_t *name_off,
             int c = keys && (aliases[i] & 4 ? a : aliases[i] & 8 ? b
                   : sift_contains(initials + initial_off[i], initial_off[i+1] - initial_off[i], t->needle, t->length, 1));
             if (t->excluded ? (a || b || c) : !(a || b || c)) { accepted = 0; break; }
-            if (!t->excluded) score += a * 100 + b * 70 + c * 70;
+            if (!t->excluded) {
+                score += a * 100 + b * 70 + c * 70;
+                if (a) score += name_bonus(names + name_off[i], name_off[i+1] - name_off[i], t);
+                if (t->length && !(aliases[i] & 1)) {
+                    if (b && !(aliases[i] & 2) && sift_has_prefix(full + full_off[i], full_off[i+1] - full_off[i], t->needle, t->length, 1)) score += 10;
+                    else if (c && !(aliases[i] & 12) && sift_has_prefix(initials + initial_off[i], initial_off[i+1] - initial_off[i], t->needle, t->length, 1)) score += 10;
+                }
+            }
         }
-        if (accepted) { ids[count] = i; scores[count++] = score; }
+        if (accepted) {
+            size_t len = name_off[i+1] - name_off[i];
+            if (positive) score -= (int32_t)((len < 64 ? len : 64) / 16);
+            ids[count] = i; scores[count++] = score;
+        }
     }
     return count;
 }

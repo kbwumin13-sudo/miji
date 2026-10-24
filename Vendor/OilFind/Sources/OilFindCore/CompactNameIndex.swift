@@ -13,17 +13,17 @@ public final class CompactNameIndex {
     public enum BuildError: Error { case capacityExceeded, invalidSerializedData }
     private struct Column {
         // Keep a valid base address even for an empty index/alternate column.
-        var bytes: [UInt8] = [0]
-        var offsets: [UInt32] = [1]
-        mutating func append(_ key: [UInt8]) throws {
+        var bytes = MappedColumn<UInt8>([0])
+        var offsets = MappedColumn<UInt32>([1])
+        func append(_ key: [UInt8]) throws {
             guard bytes.count <= Int(UInt32.max) - key.count else { throw BuildError.capacityExceeded }
             bytes.append(contentsOf: key)
             offsets.append(UInt32(bytes.count))
         }
     }
     private var names = Column(), full = Column(), initials = Column()
-    private var live: [UInt8] = []
-    private var aliases: [UInt8] = []
+    private var live = MappedColumn<UInt8>()
+    private var aliases = MappedColumn<UInt8>()
     private var fullKey: [UInt8] = [], initialKey: [UInt8] = []
     public var count: Int { names.offsets.count - 1 }
     public init() {}
@@ -45,7 +45,8 @@ public final class CompactNameIndex {
     /// Equality must still be checked when hashes collide.
     public func normalizedNameHash(_ index: UInt32) -> UInt64 {
         let i = Int(index)
-        return Self.hashNameBytes(names.bytes[Int(names.offsets[i])..<Int(names.offsets[i + 1])])
+        let start = Int(names.offsets[i]), end = Int(names.offsets[i + 1])
+        return names.bytes.withUnsafeBufferPointer { Self.hashNameBytes(UnsafeBufferPointer(rebasing: $0[start..<end])) }
     }
     static func hashNameBytes<Bytes: Sequence>(_ bytes: Bytes) -> UInt64 where Bytes.Element == UInt8 {
         var hash: UInt64 = 14_695_981_039_346_656_037
@@ -67,11 +68,11 @@ public final class CompactNameIndex {
         word(1); word(UInt32(count))
         for column in [names, full, initials] {
             word(UInt32(column.bytes.count))
-            data.append(contentsOf: column.bytes)
+            column.bytes.withUnsafeBufferPointer { data.append($0) }
             for offset in column.offsets { word(offset) }
         }
-        data.append(contentsOf: live)
-        data.append(contentsOf: aliases)
+        live.withUnsafeBufferPointer { data.append($0) }
+        aliases.withUnsafeBufferPointer { data.append($0) }
         data.append(contentsOf: SHA256.hash(data: data))
         return data
     }
@@ -114,7 +115,7 @@ public final class CompactNameIndex {
                     offsets.append(offset); previous = offset
                 }
                 guard contents[0] == 0, previous == length else { throw BuildError.invalidSerializedData }
-                return Column(bytes: contents, offsets: offsets)
+                return Column(bytes: MappedColumn(contents), offsets: MappedColumn(offsets))
             }
             let names = try column(), full = try column(), initials = try column()
             guard end - position == rows * 2 else { throw BuildError.invalidSerializedData }
@@ -142,13 +143,97 @@ public final class CompactNameIndex {
                 }
             }
             self.names = names; self.full = full; self.initials = initials
-            self.live = live; self.aliases = aliases
+            self.live = MappedColumn(live); self.aliases = MappedColumn(aliases)
         }
     }
+
+    /// Storage for a page-aligned cache, by stable name, in writing order.
+    public func columns(prefix: String) -> [(String, RawColumn)] {
+        [(prefix + "names.bytes", names.bytes), (prefix + "names.offsets", names.offsets),
+         (prefix + "full.bytes", full.bytes), (prefix + "full.offsets", full.offsets),
+         (prefix + "initials.bytes", initials.bytes), (prefix + "initials.offsets", initials.offsets),
+         (prefix + "live", live), (prefix + "aliases", aliases)]
+    }
+
+    /// Adopt columns written by `columns(prefix:)`, with the checks of
+    /// init(serialized:); mapped pages are read in place, not copied.
+    public convenience init(columns source: ColumnSource, prefix: String) throws {
+        self.init()
+        func column(_ name: String, rows: Int?) throws -> Column {
+            let bytes = try source.column(prefix + name + ".bytes", as: UInt8.self)
+            let offsets = try source.column(prefix + name + ".offsets", as: UInt32.self)
+            guard offsets.count >= 1, rows.map({ offsets.count == $0 + 1 }) ?? true,
+                  bytes.count >= 1, bytes.count <= Int(UInt32.max) else { throw BuildError.invalidSerializedData }
+            let valid = bytes.withUnsafeBufferPointer { contents in
+                offsets.withUnsafeBufferPointer { offset -> Bool in
+                    var previous: UInt32 = 1
+                    guard contents[0] == 0, offset[0] == 1 else { return false }
+                    for value in offset {
+                        guard value >= previous, Int(value) <= contents.count else { return false }
+                        previous = value
+                    }
+                    return Int(previous) == contents.count
+                }
+            }
+            guard valid else { throw BuildError.invalidSerializedData }
+            return Column(bytes: bytes, offsets: offsets)
+        }
+        let names = try column("names", rows: nil)
+        let rows = names.offsets.count - 1
+        let full = try column("full", rows: rows), initials = try column("initials", rows: rows)
+        let live = try source.column(prefix + "live", as: UInt8.self)
+        let aliases = try source.column(prefix + "aliases", as: UInt8.self)
+        guard live.count == rows, aliases.count == rows else { throw BuildError.invalidSerializedData }
+        let valid = names.bytes.withUnsafeBufferPointer { nameBytes in
+            names.offsets.withUnsafeBufferPointer { nameOff in
+                full.bytes.withUnsafeBufferPointer { fullBytes in
+                    full.offsets.withUnsafeBufferPointer { fullOff in
+                        initials.bytes.withUnsafeBufferPointer { initialBytes in
+                            initials.offsets.withUnsafeBufferPointer { initialOff in
+                                live.withUnsafeBufferPointer { live in
+                                    aliases.withUnsafeBufferPointer { aliases -> Bool in
+                                        func key(_ bytes: UnsafeBufferPointer<UInt8>, _ offsets: UnsafeBufferPointer<UInt32>, _ i: Int) -> UnsafeBufferPointer<UInt8> {
+                                            UnsafeBufferPointer(rebasing: bytes[Int(offsets[i])..<Int(offsets[i + 1])])
+                                        }
+                                        for i in 0..<rows {
+                                            let flag = aliases[i]
+                                            guard live[i] <= 1, flag & ~31 == 0,
+                                                  flag & 18 != 18, flag & 12 != 12,
+                                                  flag & 16 == 0 || flag & 1 != 0,
+                                                  flag & 18 == 0 || fullOff[i] == fullOff[i + 1],
+                                                  flag & 12 == 0 || initialOff[i] == initialOff[i + 1] else { return false }
+                                            if flag & 1 != 0 {
+                                                let word: (UInt8) -> Bool = { ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) }
+                                                guard key(nameBytes, nameOff, i).allSatisfy({ $0 < 128 }),
+                                                      key(fullBytes, fullOff, i).allSatisfy(word),
+                                                      key(initialBytes, initialOff, i).allSatisfy(word) else { return false }
+                                            }
+                                        }
+                                        return true
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard valid else { throw BuildError.invalidSerializedData }
+        self.names = names; self.full = full; self.initials = initials
+        self.live = live; self.aliases = aliases
+    }
+
+    /// Whether every unique name is live (true for DeduplicatedNameIndex pools).
+    var allLive: Bool { live.withUnsafeBufferPointer { $0.allSatisfy { $0 == 1 } } }
     public func remove(_ index: UInt32) { live[Int(index)] = 0 }
     public func nameEquals(_ index: UInt32, _ normalized: String) -> Bool {
         let start = Int(names.offsets[Int(index)]), end = Int(names.offsets[Int(index) + 1])
-        return names.bytes[start..<end].elementsEqual(normalized.utf8)
+        var key = normalized
+        return key.withUTF8 { utf8 in
+            utf8.count == end - start && (utf8.isEmpty || names.bytes.withUnsafeBufferPointer {
+                memcmp($0.baseAddress! + start, utf8.baseAddress!, utf8.count) == 0
+            })
+        }
     }
 
     /// Names must already use Miji's NFC + lowercase normalization.

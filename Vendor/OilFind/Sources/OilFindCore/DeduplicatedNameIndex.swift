@@ -9,14 +9,14 @@ public final class DeduplicatedNameIndex {
     public typealias BuildError = CompactNameIndex.BuildError
 
     private var names = CompactNameIndex()
-    private var rowNames: [UInt32] = []
-    private var live: [UInt8] = []
+    private var rowNames = MappedColumn<UInt32>()
+    private var live = MappedColumn<UInt8>()
     // Open addressing, linear probing, <= 75% full. Zero is empty; other slots
     // contain uniqueID + 1. No per-name String objects or stored hash array.
-    private var lookup: [UInt32] = []
+    private var lookup = MappedColumn<UInt32>()
     // Immutable ordering for the unique-name prefix prepared at publication.
     // Appended names use byte comparison until the owner's next full rebuild.
-    private var nameOrder: [UInt32] = []
+    private var nameOrder = MappedColumn<UInt32>()
 
     public var count: Int { rowNames.count }
     /// Includes unique names whose file rows have all been removed.
@@ -110,13 +110,39 @@ public final class DeduplicatedNameIndex {
             if comparisons % 4096 == 0, cancelled() { throw CancellationError() }
             return names.compareNames(a, b) < 0
         }
-        var ranks = [UInt32](repeating: 0, count: uniqueCount)
-        for (rank, name) in ordered.enumerated() {
-            if rank % 4096 == 0, cancelled() { throw CancellationError() }
-            ranks[Int(name)] = UInt32(rank)
+        nameOrder = try ranks(of: ordered, cancelled: cancelled)
+    }
+
+    private func ranks(of ordered: [UInt32], cancelled: () -> Bool) throws -> MappedColumn<UInt32> {
+        let ranks = MappedColumn<UInt32>(repeating: 0, count: ordered.count)
+        try ranks.withUnsafeMutableBufferPointer { ranks in
+            for (rank, name) in ordered.enumerated() {
+                if rank % 4096 == 0, cancelled() { throw CancellationError() }
+                ranks[Int(name)] = UInt32(rank)
+            }
         }
         if cancelled() { throw CancellationError() }
-        nameOrder = ranks
+        return ranks
+    }
+
+    /// Rank names appended since the order was prepared, so a saved cache
+    /// restores a complete order: sort only the new names, then merge.
+    public func completeNameOrder() throws {
+        guard !nameOrder.isEmpty, nameOrder.count < uniqueCount else { return }
+        var ordered = [UInt32](repeating: 0, count: nameOrder.count)
+        nameOrder.withUnsafeBufferPointer { ranks in
+            for (name, rank) in ranks.enumerated() { ordered[Int(rank)] = UInt32(name) }
+        }
+        let added = (nameOrder.count..<uniqueCount).map { UInt32($0) }.sorted { names.compareNames($0, $1) < 0 }
+        var merged: [UInt32] = []
+        merged.reserveCapacity(uniqueCount)
+        var i = 0, j = 0
+        while i < ordered.count || j < added.count {
+            if j == added.count || (i < ordered.count && names.compareNames(ordered[i], added[j]) <= 0) {
+                merged.append(ordered[i]); i += 1
+            } else { merged.append(added[j]); j += 1 }
+        }
+        nameOrder = try ranks(of: merged, cancelled: { false })
     }
 
     public func forEachMatch(_ terms: [CompactNameIndex.Term], cancelled: () -> Bool,
@@ -134,8 +160,12 @@ public final class DeduplicatedNameIndex {
             if cancelled() { throw CancellationError() }
             return
         }
-        var scores = [Int32](repeating: -1, count: uniqueCount)
-        try names.forEachMatch(terms, cancelled: cancelled) { scores[Int($0)] = $1 }
+        // Mapped scratch goes back to the system when the query ends, rather
+        // than staying with the allocator after every search.
+        let scores = MappedColumn<Int32>(repeating: -1, count: uniqueCount)
+        try scores.withUnsafeMutableBufferPointer { scores in
+            try names.forEachMatch(terms, cancelled: cancelled) { scores[Int($0)] = $1 }
+        }
         try live.withUnsafeBufferPointer { active in
             try rowNames.withUnsafeBufferPointer { ids in
                 try scores.withUnsafeBufferPointer { values in
@@ -153,18 +183,20 @@ public final class DeduplicatedNameIndex {
     }
 
     private func rebuildLookup(capacity: Int) throws {
-        var table = [UInt32](repeating: 0, count: capacity)
-        for i in 0..<uniqueCount {
-            let id = UInt32(i)
-            var slot = Int(truncatingIfNeeded: names.normalizedNameHash(id)) & (capacity - 1)
-            while table[slot] != 0 {
-                // Rebuilding on load also rejects duplicate unique-name rows.
-                guard names.compareNames(table[slot] - 1, id) != 0 else {
-                    throw BuildError.invalidSerializedData
+        let table = MappedColumn<UInt32>(repeating: 0, count: capacity)
+        try table.withUnsafeMutableBufferPointer { table in
+            for i in 0..<uniqueCount {
+                let id = UInt32(i)
+                var slot = Int(truncatingIfNeeded: names.normalizedNameHash(id)) & (capacity - 1)
+                while table[slot] != 0 {
+                    // Rebuilding on load also rejects duplicate unique-name rows.
+                    guard names.compareNames(table[slot] - 1, id) != 0 else {
+                        throw BuildError.invalidSerializedData
+                    }
+                    slot = (slot + 1) & (capacity - 1)
                 }
-                slot = (slot + 1) & (capacity - 1)
+                table[slot] = id + 1
             }
-            table[slot] = id + 1
         }
         lookup = table
     }
@@ -186,9 +218,66 @@ public final class DeduplicatedNameIndex {
         word(UInt32(UInt64(uniqueData.count) >> 32))
         data.append(uniqueData)
         for id in rowNames { word(id) }
-        data.append(contentsOf: live)
+        live.withUnsafeBufferPointer { data.append($0) }
         data.append(contentsOf: SHA256.hash(data: data))
         return data
+    }
+
+    /// Storage for a page-aligned cache, by stable name, in writing order. The
+    /// lookup table and name order are kept, so a restore rebuilds neither.
+    public func columns() -> [(String, RawColumn)] {
+        names.columns(prefix: "unique.") + [("rows", rowNames), ("rows.live", live), ("lookup", lookup), ("order", nameOrder)]
+    }
+
+    /// Adopt columns written by `columns()`. Rejects what init(serialized:)
+    /// rejects, and a lookup table whose probes miss a name or meet a duplicate.
+    public convenience init(columns source: ColumnSource) throws {
+        self.init()
+        names = try CompactNameIndex(columns: source, prefix: "unique.")
+        rowNames = try source.column("rows", as: UInt32.self)
+        live = try source.column("rows.live", as: UInt8.self)
+        lookup = try source.column("lookup", as: UInt32.self)
+        nameOrder = try source.column("order", as: UInt32.self)
+        let unique = uniqueCount
+        guard live.count == rowNames.count, unique <= rowNames.count, names.allLive,
+              live.withUnsafeBufferPointer({ $0.allSatisfy { $0 <= 1 } }) else { throw BuildError.invalidSerializedData }
+        var seen = [UInt8](repeating: 0, count: unique)
+        let referenced = rowNames.withUnsafeBufferPointer { ids -> Bool in
+            for id in ids {
+                guard Int(id) < unique else { return false }
+                seen[Int(id)] = 1
+            }
+            return true
+        }
+        guard referenced, seen.allSatisfy({ $0 == 1 }) else { throw BuildError.invalidSerializedData }
+        let capacity = lookup.count
+        if unique == 0 {
+            // The writer keeps no table for an empty pool; any other would
+            // never be resized by append and could be probed forever.
+            guard capacity == 0 else { throw BuildError.invalidSerializedData }
+        } else {
+            guard capacity >= 16, capacity & (capacity - 1) == 0, unique <= capacity - capacity / 4 else { throw BuildError.invalidSerializedData }
+            var filled = 0
+            for slot in lookup where slot != 0 {
+                guard Int(slot) <= unique else { throw BuildError.invalidSerializedData }
+                filled += 1
+            }
+            guard filled == unique else { throw BuildError.invalidSerializedData }
+            for i in 0..<unique {
+                let id = UInt32(i)
+                var slot = Int(truncatingIfNeeded: names.normalizedNameHash(id)) & (capacity - 1)
+                while lookup[slot] != id + 1 {
+                    guard lookup[slot] != 0, names.compareNames(lookup[slot] - 1, id) != 0 else { throw BuildError.invalidSerializedData }
+                    slot = (slot + 1) & (capacity - 1)
+                }
+            }
+        }
+        guard nameOrder.count <= unique else { throw BuildError.invalidSerializedData }
+        var ranked = [UInt8](repeating: 0, count: nameOrder.count)
+        for rank in nameOrder {
+            guard Int(rank) < ranked.count, ranked[Int(rank)] == 0 else { throw BuildError.invalidSerializedData }
+            ranked[Int(rank)] = 1
+        }
     }
 
     public convenience init(serialized data: Data) throws {
@@ -235,7 +324,7 @@ public final class DeduplicatedNameIndex {
                 rowNames.append(id); seen[Int(id)] = 1
             }
             guard seen.allSatisfy({ $0 == 1 }) else { throw BuildError.invalidSerializedData }
-            live = Array(bytes[position..<end])
+            live = MappedColumn(bytes[position..<end])
             guard live.allSatisfy({ $0 <= 1 }) else { throw BuildError.invalidSerializedData }
             if uniqueCount > 0 {
                 var capacity = 16

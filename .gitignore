@@ -12,6 +12,7 @@ output/
 # Local research material and agent working state
 artifacts/
 .omx/
+.codegraph/
 项目协作.md
 项目记忆/
 

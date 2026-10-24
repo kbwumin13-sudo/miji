@@ -116,9 +116,26 @@ final class FileScanSession {
     private let base: URL
     private let volumePolicy: ScanVolumePolicy
     private var enumerator: FileManager.DirectoryEnumerator?
+    private var context: DirectoryContext?
     private var queuedDirectories: Set<String>
+    /// iCloud state of queued directories, so each is asked once per session.
+    private var directoryUbiquity: [String: Bool] = [:]
     private var batch: [FileRecord] = []
     private let keys: Set<URLResourceKey> = [.isDirectoryKey,.isSymbolicLinkKey,.isRegularFileKey,.isUbiquitousItemKey,.ubiquitousItemDownloadingStatusKey,.isPackageKey,.volumeUUIDStringKey]
+    // Prefetching the iCloud keys runs File Provider heuristics on every entry
+    // (~150 us each, most of a scan). Outside a cloud folder they are asked
+    // only for directories, which can be provider roots, and for placeholders.
+    private static let ubiquityKeys: Set<URLResourceKey> = [.isUbiquitousItemKey,.ubiquitousItemDownloadingStatusKey]
+    private struct DirectoryContext {
+        let relative: String, absolute: String
+        /// The directory is canonical, so a child's relative path, filter path
+        /// and resolved path are plain concatenations (see visitDirect).
+        let direct: Bool
+        let filterPath: String?
+        let hiddenAncestor: Bool, cacheAncestor: Bool
+        let ubiquitous: Bool
+        let keys: Set<URLResourceKey>
+    }
     private let excluded: Set<String> = ["node_modules",".git",".svn",".build",".venv","venv","__pycache__","DerivedData","Pods","Carthage",".Trash",".Trashes",".Spotlight-V100",".fseventsd"]
     private let userLibrary=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library").path
     private(set) var checkpoint: FileScanCheckpoint
@@ -167,8 +184,74 @@ final class FileScanSession {
         checkpoint.count += 1
         return v.isDirectory == true && v.isPackage != true
     }
+    private static func available(_ v: URLResourceValues) -> Bool {
+        v.isUbiquitousItem != true || v.ubiquitousItemDownloadingStatus == .current || v.ubiquitousItemDownloadingStatus == .downloaded
+    }
+    private func directoryContext(_ directory: String, url: URL) -> DirectoryContext {
+        let absolute=url.path
+        // Standardizing and resolving a canonical path change nothing, so a
+        // child's results equal its concatenated path. Not direct: / (its
+        // children include firmlinks), and /private or /var/automount and
+        // below, whose children standardizing rewrites (/private/var -> /var).
+        let rewritten=["/private","/var/automount"].contains { absolute == $0 || absolute.hasPrefix($0+"/") }
+        let direct=absolute != "/" && !rewritten && URL(fileURLWithPath:absolute).standardizedFileURL.resolvingSymlinksInPath().path == absolute
+        let parts=directory.split(separator:"/").map(String.init)
+        let ubiquitous=directoryUbiquity.removeValue(forKey:directory)
+            ?? ((try? url.resourceValues(forKeys:[.isUbiquitousItemKey]))?.isUbiquitousItem == true)
+        return DirectoryContext(relative:directory,absolute:absolute,direct:direct,
+                                filterPath:direct && !pathFilter.isEmpty ? IndexPathFilter.canonicalPath(absolute) : nil,
+                                hiddenAncestor:parts.contains {$0.hasPrefix(".")},cacheAncestor:parts.contains(where:excluded.contains),
+                                ubiquitous:ubiquitous,keys:ubiquitous ? keys : keys.subtracting(Self.ubiquityKeys))
+    }
+    /// visit() for a child of a direct directory: the same record and result,
+    /// with its paths joined instead of standardized, canonicalized and
+    /// resolved again. Returns the relative path to queue.
+    private func visitDirect(_ url: URL, in context: DirectoryContext) throws -> String? {
+        let name=url.lastPathComponent
+        guard !name.isEmpty,name != ".",name != "..",!name.contains("/"),!name.utf8.contains(0) else {
+            return try visit(url) ? relative(url) : nil
+        }
+        // Standardized paths hold each component in its file system
+        // representation (HFS+ decomposition); the URL's own name is as stored.
+        let stored=name.utf8.allSatisfy {$0 < 128} ? name : String(cString:(name as NSString).fileSystemRepresentation)
+        let relative=context.relative.isEmpty ? stored : context.relative+"/"+stored
+        let absolute=context.absolute+"/"+name
+        if let filterPath=context.filterPath,pathFilter.ignores(canonical:(filterPath == "/" ? "" : filterPath)+"/"+stored) {return nil}
+        if !checkpoint.options.includeHidden && (context.hiddenAncestor || name.hasPrefix(".")) {return nil}
+        if checkpoint.options.excludeDevelopmentCaches && (context.cacheAncestor || excluded.contains(name) || absolute == userLibrary || absolute.hasPrefix(userLibrary+"/")) {return nil}
+        let v=try url.resourceValues(forKeys:context.keys)
+        if v.isSymbolicLink == true {return nil}
+        let isDirectory=v.isDirectory == true
+        if isDirectory,volumePolicy.skipsDirectory(path:absolute,volumeUUID:v.volumeUUIDString) {return nil}
+        let kind=FileKind.classify(extension:url.pathExtension,isDirectory:isDirectory)
+        let content=kind == .image || kind == .document || kind == .code
+        let signature:FileSignature,flags:UInt32
+        if isDirectory && kind == .document {
+            // Document packages hash their children, as FileSignature.read does.
+            signature=try FileSignature.read(url);flags=0
+        } else {
+            let entry=try FileSignature.metadata(path:absolute)
+            signature=entry.signature;flags=entry.flags
+        }
+        let available:Bool,cloud:Bool
+        if context.ubiquitous {
+            available=Self.available(v);cloud=v.isUbiquitousItem == true
+        } else if isDirectory || flags & UInt32(SF_DATALESS) != 0 {
+            let values=try url.resourceValues(forKeys:Self.ubiquityKeys)
+            available=Self.available(values);cloud=values.isUbiquitousItem == true
+        } else {available=true;cloud=false}
+        batch.append(FileRecord(rootID:root.id,relativePath:relative,name:url.lastPathComponent,fileExtension:url.pathExtension.lowercased(),kind:kind,size:signature.size,modified:signature.modified,inode:signature.inode,contentState:content ? (available ? "pending" : "deferred") : "skipped",contentError:available ? nil : "文件尚未下载到本机"))
+        checkpoint.count += 1
+        guard isDirectory && v.isPackage != true else {return nil}
+        directoryUbiquity[relative]=cloud
+        return relative
+    }
     private func queue(_ url: URL) {
-        guard let path=relative(url),queuedDirectories.insert(path).inserted else {return}
+        guard let path=relative(url) else {return}
+        queue(path)
+    }
+    private func queue(_ path: String) {
+        guard queuedDirectories.insert(path).inserted else {return}
         checkpoint.directories.append(path)
     }
     private func flush(_ progress: (Int)->Void) throws {
@@ -212,11 +295,17 @@ final class FileScanSession {
                     guard (info.st_mode & S_IFMT) == S_IFDIR else {checkpoint.currentDirectory=nil;return}
                     var options: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants,.skipsPackageDescendants]
                     if !checkpoint.options.includeHidden {options.insert(.skipsHiddenFiles)}
-                    enumerator=FileManager.default.enumerator(at:url,includingPropertiesForKeys:Array(keys),options:options,errorHandler:{[weak self] url,error in self?.recordFailure(url,error);return true})
+                    let context=directoryContext(directory,url:url)
+                    enumerator=FileManager.default.enumerator(at:url,includingPropertiesForKeys:Array(context.keys),options:options,errorHandler:{[weak self] url,error in self?.recordFailure(url,error);return true})
                     if enumerator == nil {recordFailure(url,CocoaError(.fileReadNoPermission));checkpoint.currentDirectory=nil;return}
+                    self.context=context
                 }
-                guard let url=enumerator?.nextObject() as? URL else {enumerator=nil;checkpoint.currentDirectory=nil;return}
-                do {if try visit(url) {queue(url)}} catch {recordFailure(url,error)}
+                guard let url=enumerator?.nextObject() as? URL else {enumerator=nil;context=nil;checkpoint.currentDirectory=nil;return}
+                if let context,context.direct {
+                    do {if let path=try visitDirect(url,in:context) {queue(path)}} catch {recordFailure(url,error)}
+                } else {
+                    do {if try visit(url) {queue(url)}} catch {recordFailure(url,error)}
+                }
                 if batch.count >= 300 {try flush(progress)}
             }
         }

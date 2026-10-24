@@ -28,11 +28,17 @@ public final class NameSearchEngine: @unchecked Sendable {
     private var snapshot: NameSnapshot?
     private var revision: UInt64 = 0
     private var cachedRevision: Int64?
+    /// Opens recorded by the app, for ranking (none for a benchmark database).
+    public let openHistory: OpenHistory?
 
     /// immutable is only for a closed, checkpointed database used as a benchmark.
     public init(databaseURL: URL, immutable: Bool = false) throws {
         self.databaseURL = databaseURL
         self.immutable = immutable
+        let identity = (try? FileManager.default.attributesOfItem(atPath: databaseURL.path)).map {
+            "\(($0[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0)-\(($0[.systemNumber] as? NSNumber)?.uint64Value ?? 0)-\(($0[.creationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        }
+        openHistory = immutable || identity == nil ? nil : OpenHistory(url: databaseURL.appendingPathExtension("opens.json"), database: identity!)
         _ = try NameMetadataReader(url: databaseURL, immutable: immutable, cancelled: { false })
     }
     public var isReady: Bool {
@@ -56,7 +62,7 @@ public final class NameSearchEngine: @unchecked Sendable {
         let reader = try NameMetadataReader(url: databaseURL, immutable: immutable, cancelled: cancelled)
         try reader.execute("BEGIN")
         defer { try? reader.execute("ROLLBACK") }
-        let new:NameSnapshot
+        var new:NameSnapshot
         cachedRevision=nil
         if !immutable,let latest=try catalogRevision(reader),
            let cached=try? NameSnapshotCache.load(database:databaseURL,revision:latest) {
@@ -68,8 +74,62 @@ public final class NameSearchEngine: @unchecked Sendable {
         } else {
             new=try rebuild(reader)
         }
+        // A version 1 cache has no tiers. Searching starts now without them;
+        // completeUpgrade adds them, off the search path, and saves version 2.
+        if !new.needsTiers {new=try mapped(new,cancelled:cancelled)}
         try publish(new, version: version, cancelled: cancelled)
     }
+
+    /// After a load from a version 1 cache: read every row's location tier with
+    /// a private reader while searches go on (one pass over all paths, tens of
+    /// seconds on a cold disk), then set them and map version 2 under the lock.
+    /// Returns at once when nothing is pending. Call off the search queue.
+    public func completeUpgrade(cancelled: @escaping () -> Bool = { false }) throws {
+        // Under the operation lock: a refresh holds it while its snapshot is
+        // detached (nil), so the snapshot read here is never that gap.
+        operationLock.lock()
+        stateLock.lock(); let pending = snapshot, version = revision; stateLock.unlock()
+        let needed = pending?.needsTiers == true
+        operationLock.unlock()
+        guard let pending, needed else { return }
+        let reader = try NameMetadataReader(url: databaseURL, immutable: immutable, cancelled: cancelled)
+        try reader.execute("BEGIN")
+        defer { try? reader.execute("ROLLBACK") }
+        let rows = try reader.prepare("SELECT id,\(SearchDatabase.locationTier("files")) FROM files ORDER BY id")
+        defer { sqlite3_finalize(rows) }
+        let ids = MappedColumn<Int64>(), tiers = MappedColumn<UInt8>()
+        while try reader.next(rows) {
+            ids.append(sqlite3_column_int64(rows, 0)); tiers.append(UInt8(clamping: sqlite3_column_int(rows, 1)))
+        }
+        operationLock.lock(); defer { operationLock.unlock() }
+        stateLock.lock(); let current = snapshot === pending && revision == version; stateLock.unlock()
+        guard current, pending.needsTiers else { return }
+        for k in 0..<ids.count {
+            if let index = pending.index(ids[k]) { pending.tiers[Int(index)] = tiers[k] }
+        }
+        pending.needsTiers = false
+        try publish(mapped(pending, cancelled: cancelled), version: version, cancelled: cancelled)
+    }
+
+    /// A snapshot built in memory (a rebuild, or a version 1 cache) is saved
+    /// and replaced by its mapped restore, so it stops occupying anonymous
+    /// memory in this session rather than after the next launch.
+    private func mapped(_ snapshot:NameSnapshot,cancelled:() -> Bool) throws -> NameSnapshot {
+        guard !immutable,!snapshot.isMapped,let revision=snapshot.changeRevision else {return snapshot}
+        try snapshot.core.prepareNameOrder(cancelled:cancelled)
+        do {
+            try NameSnapshotCache.save(snapshot,database:databaseURL)
+            let restored=try NameSnapshotCache.load(database:databaseURL,revision:revision)
+            cachedRevision=revision
+            return restored
+        } catch {
+            // Keep searching from memory; the next quiet save retries.
+            return snapshot
+        }
+    }
+
+    /// The user opened or revealed this file from a result list.
+    public func recordOpen(_ id: Int64) { openHistory?.record(id) }
 
     /// Save only at quiet lifecycle boundaries, never for each filesystem event.
     public func saveCache() throws {
@@ -102,12 +162,12 @@ public final class NameSearchEngine: @unchecked Sendable {
         if let previous = current.changeRevision, let latest = try catalogRevision(reader) {
             if latest-previous > 100_000 || latest < previous {
                 let rebuilt = try rebuild(reader)
-                try publish(rebuilt,version:version,cancelled:cancelled)
+                try publish(mapped(rebuilt,cancelled:cancelled),version:version,cancelled:cancelled)
                 return
             }
             try applyJournal(current,latest:latest,reader:reader)
             if current.deadCount > max(16_384,current.liveCount/4) {
-                try publish(rebuild(reader),version:version,cancelled:cancelled)
+                try publish(mapped(rebuild(reader),cancelled:cancelled),version:version,cancelled:cancelled)
             } else { try publish(current,version:version,cancelled:cancelled) }
             return
         }
@@ -140,12 +200,12 @@ public final class NameSearchEngine: @unchecked Sendable {
         // Bound rename/deletion tombstones. Compaction is occasional, never per query.
         if current.deadCount > max(16_384, current.liveCount / 4) {
             let rebuilt = NameSnapshot()
-            let rows = try reader.prepare("SELECT \(NameSnapshot.columns) FROM files ORDER BY id")
+            let rows = try reader.prepare("SELECT \(NameSnapshot.columns("files")) FROM files ORDER BY id")
             defer { sqlite3_finalize(rows) }
             while try reader.next(rows) { try autoreleasepool { try rebuilt.upsert(rows, reader: reader, incremental: false) } }
             rebuilt.baseCount = rebuilt.ids.count
             rebuilt.changeRevision = try catalogRevision(reader)
-            try publish(rebuilt, version: version, cancelled: cancelled)
+            try publish(mapped(rebuilt, cancelled: cancelled), version: version, cancelled: cancelled)
         } else {
             try publish(current, version: version, cancelled: cancelled)
         }
@@ -185,6 +245,17 @@ public final class NameSearchEngine: @unchecked Sendable {
         let kind = options.kind.flatMap { current.kindKeys[$0.rawValue] }
         if options.kind != nil && kind == nil { return [] }
         let textTerms = parsed.terms.filter { $0.field == .text }.map { CompactNameIndex.Term(value: $0.value, excluded: $0.isExcluded) }
+        // Recently opened files rise among comparable matches. A 64K-bit
+        // filter keeps the per-match cost to one bit test for everything else.
+        var lifted: [UInt32: Int32] = [:], liftedBits: [UInt64] = []
+        if options.sort == .relevance, let boosts = openHistory?.boosts(), !boosts.isEmpty {
+            liftedBits = [UInt64](repeating: 0, count: 1_024)
+            for (id, lift) in boosts {
+                guard let index = current.index(id), current.live[Int(index)] != 0 else { continue }
+                lifted[index] = lift
+                liftedBits[Int(index & 0xFFFF) >> 6] |= 1 << UInt64(index & 63)
+            }
+        }
         var heap = NameHitHeap(capacity: min(options.limit, current.liveCount)) { a, b in
             switch options.sort {
             case .relevance: if a.score != b.score { return a.score > b.score }
@@ -203,7 +274,11 @@ public final class NameSearchEngine: @unchecked Sendable {
                 let match = (filter.isKind ? current.kinds[i] : current.extensions[i]) == filter.value
                 if filter.isExcluded ? match : !match { return }
             }
-            heap.insert(NameRankedHit(index: index, score: score))
+            // A match in Library, system or dependency folders ranks below the
+            // same match among the user's own files (see locationTier).
+            var ranked = score - 20 * Int32(current.tiers[i])
+            if !lifted.isEmpty, liftedBits[Int(index & 0xFFFF) >> 6] & (1 << UInt64(index & 63)) != 0, let lift = lifted[index] { ranked += lift }
+            heap.insert(NameRankedHit(index: index, score: ranked))
         }
         if cancelled() { throw CancellationError() }
         return heap.sorted().map { current.ids[Int($0.index)] }
@@ -226,14 +301,13 @@ public final class NameSearchEngine: @unchecked Sendable {
     }
     private func applyJournal(_ current:NameSnapshot,latest:Int64,reader:NameMetadataReader)throws {
         guard let previous=current.changeRevision,latest != previous else {return}
-        let columns=NameSnapshot.columns.split(separator:",").map {"f."+$0}.joined(separator:",")
-        let rows=try reader.prepare("SELECT \(columns),c.file_id FROM name_changes c LEFT JOIN files f ON f.id=c.file_id WHERE c.revision>? ORDER BY c.revision")
+        let rows=try reader.prepare("SELECT \(NameSnapshot.columns("f")),c.file_id FROM name_changes c LEFT JOIN files f ON f.id=c.file_id WHERE c.revision>? ORDER BY c.revision")
         defer {sqlite3_finalize(rows)}
         sqlite3_bind_int64(rows,1,previous)
         while try reader.next(rows) {
             try autoreleasepool {
                 if sqlite3_column_type(rows,0)==SQLITE_NULL {
-                    if let index=current.index(sqlite3_column_int64(rows,7)) {current.remove(index)}
+                    if let index=current.index(sqlite3_column_int64(rows,8)) {current.remove(index)}
                 } else {try current.upsert(rows,reader:reader,incremental:true)}
             }
         }
@@ -241,7 +315,7 @@ public final class NameSearchEngine: @unchecked Sendable {
     }
     private func rebuild(_ reader:NameMetadataReader) throws -> NameSnapshot {
         let rebuilt=NameSnapshot()
-        let rows=try reader.prepare("SELECT \(NameSnapshot.columns) FROM files ORDER BY id")
+        let rows=try reader.prepare("SELECT \(NameSnapshot.columns("files")) FROM files ORDER BY id")
         defer {sqlite3_finalize(rows)}
         while try reader.next(rows) {try autoreleasepool {try rebuilt.upsert(rows,reader:reader,incremental:false)}}
         rebuilt.baseCount=rebuilt.ids.count
@@ -249,7 +323,7 @@ public final class NameSearchEngine: @unchecked Sendable {
         return rebuilt
     }
     private func refreshRows(_ predicate: String, values: [String], current: NameSnapshot, reader: NameMetadataReader) throws {
-        let rows = try reader.prepare("SELECT \(NameSnapshot.columns) FROM files WHERE \(predicate) ORDER BY id")
+        let rows = try reader.prepare("SELECT \(NameSnapshot.columns("files")) FROM files WHERE \(predicate) ORDER BY id")
         defer { sqlite3_finalize(rows) }
         try reader.bind(values, to: rows)
         while try reader.next(rows) { try autoreleasepool { try current.upsert(rows, reader: reader, incremental: true) } }

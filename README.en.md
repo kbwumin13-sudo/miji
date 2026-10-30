@@ -51,7 +51,7 @@ Press `⌃⌥Space`, type `sxfx` to open your 数学分析 (mathematical analysi
 
 ## Quick start
 
-1. Download `Miji-1.1.5-macOS-arm64.zip` from [Releases](https://github.com/kbwumin13-sudo/miji/releases/latest), unzip it and drag 觅迹.app into Applications.
+1. Download `Miji-1.2.0-macOS-arm64.zip` from [Releases](https://github.com/kbwumin13-sudo/miji/releases/latest), unzip it and drag 觅迹.app into Applications.
 2. Miji is ad-hoc signed and not yet notarized, so macOS refuses the first launch, saying either that the developer cannot be verified or that the app "is damaged". Run the command below and open it again. If macOS only says it cannot verify the developer, you can instead try opening the app once, then click **Open Anyway** at the bottom of System Settings → Privacy & Security.
 
    ```sh
@@ -72,10 +72,15 @@ Requirements: Apple Silicon, macOS 14 or later.
 | `Return` | Open |
 | `⌘Return` or `⌘R` | Reveal in Finder |
 | `⌘Y`, or `Space` while the result list has focus | Quick Look |
+| `⌘C` | Copy the selected file; text fields and document selections keep native text copying |
 | `⌘⇧C` | Copy path |
 | `⌘F` | Back to the search field |
 | `⌘,` | Index & Settings |
 | `Esc` or `⌘W` | Hide |
+
+In 1.2.0, the collapsible right pane previews pictures, PDFs, Office documents, source code and media. It highlights matching text and shows why the result matched. The footer switches between a list and a thumbnail grid. Media plays on demand and stops when the preview closes or the selection changes.
+
+PDF results can show the matching page and open it in a separate reading window. Newly extracted PDFs store page locations for both selectable text and OCR; older selectable PDFs find their page on demand. Existing scanned PDFs keep their indexed text and gain page locations when re-extracted. The upgrade does not rebuild the index. Code previews show matching lines, and open at that line when VS Code, VS Code Insiders or Cursor is the default editor. If the file changed since indexing, stale locations are disabled until its index catches up.
 
 ## Search syntax
 

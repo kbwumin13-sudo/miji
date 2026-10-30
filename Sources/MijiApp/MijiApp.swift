@@ -27,6 +27,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
     let model=AppModel()
     private var searchPanel:NSPanel!
     private var settingsWindow:NSWindow?
+    private var pdfWindow:NSWindow?
     private var statusItem:NSStatusItem?
     private var hotKey:EventHotKeyRef?
     private var handler:EventHandlerRef?
@@ -43,12 +44,15 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         panel.contentView=NSHostingView(rootView:MainView(model:model))
         searchPanel=panel
         model.openMain={ [weak self] in self?.showSearch() }
-        Publishers.CombineLatest(model.$query,model.$hits).map{AppModel.panelHeight(query:$0,resultCount:$1.count)}.removeDuplicates().sink{[weak self] height in
-            guard let panel=self?.searchPanel else{return}
-            let old=panel.frame
-            panel.setFrame(NSRect(x:old.minX,y:old.maxY-height,width:800,height:height),display:true)
+        Publishers.CombineLatest4(model.$query,model.$hits,model.$previewEnabled,model.$gridEnabled).sink{[weak self] _ in
+            // @Published emits before assignment; size using the completed model state.
+            DispatchQueue.main.async {self?.resizeSearchPanel()}
         }.store(in:&subscriptions)
         model.$showSettings.filter{$0}.sink{[weak self] _ in DispatchQueue.main.async{self?.openSettings();self?.model.showSettings=false}}.store(in:&subscriptions)
+        NotificationCenter.default.publisher(for:NSWindow.willCloseNotification).sink{[weak self] notification in
+            guard let self,let window=notification.object as? NSWindow,window===self.pdfWindow else{return}
+            window.contentView=nil;self.pdfWindow=nil
+        }.store(in:&subscriptions)
         setupMenus()
         var event=EventTypeSpec(eventClass:OSType(kEventClassKeyboard),eventKind:UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(),{_,_,_ in DispatchQueue.main.async{AppDelegate.shared?.toggleSearch()};return noErr},1,&event,nil,&handler)
@@ -63,16 +67,37 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
             case .reveal: self.model.revealSelected()
             case .preview: self.preview()
             case .copyPath: self.model.copySelectedPath()
+            case .copyFile: self.model.copySelectedFile()
+            case .moveLeft: if self.model.gridEnabled {self.model.moveSelection(-1)}else{return event}
+            case .moveRight: if self.model.gridEnabled {self.model.moveSelection(1)}else{return event}
             case .hide: self.hideSearch()
             case .settings: self.openSettings()
-            case .moveDown: self.model.moveSelection(1)
-            case .moveUp: self.model.moveSelection(-1)
+            case .moveDown: self.model.moveSelection(self.model.gridEnabled ? self.model.gridColumns : 1)
+            case .moveUp: self.model.moveSelection(self.model.gridEnabled ? -self.model.gridColumns : -1)
             case .open: self.model.openSelected()
             case nil: return event
             }
             return nil
         }
         DispatchQueue.main.async{self.showSearch()}
+    }
+    private func resizeSearchPanel() {
+        guard let panel=searchPanel else{return}
+        let old=panel.frame, width=model.panelWidth, height=model.panelHeight
+        let screen=(panel.screen ?? NSScreen.main)?.visibleFrame ?? old
+        let x=min(max(screen.minX,old.midX-width/2),max(screen.minX,screen.maxX-width))
+        let y=min(max(screen.minY,old.maxY-height),max(screen.minY,screen.maxY-height))
+        panel.setFrame(NSRect(x:x,y:y,width:width,height:height),display:true)
+    }
+    func showPDFMatch() {
+        guard let document=model.previewPDF,let page=model.previewPage else{return}
+        let window=NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:700),styleMask:[.titled,.closable,.resizable,.miniaturizable],backing:.buffered,defer:false)
+        window.title=model.selected?.file.name ?? "PDF 预览"
+        window.isReleasedWhenClosed=false
+        window.contentView=NSHostingView(rootView:PDFDocumentPreview(document:document,page:page,terms:PreviewResolver.terms(in:model.query)))
+        hideSearch()
+        pdfWindow?.close();pdfWindow=window
+        window.center();window.makeKeyAndOrderFront(nil)
     }
     private func setupMenus() {
         let main=NSMenu();let appItem=NSMenuItem();let appMenu=NSMenu()
@@ -121,8 +146,8 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
     func applicationDidResignActive(_ notification:Notification){if ProcessInfo.processInfo.environment["MIJI_UI_TESTING"] != "1" {hideSearch()}}
     func applicationWillTerminate(_ notification:Notification){model.service?.stop();if let hotKey{UnregisterEventHotKey(hotKey)};if let handler{RemoveEventHandler(handler)};if let monitor{NSEvent.removeMonitor(monitor)}}
     func preview() {
-        guard let hit=model.selected,hit.root.isOnline,FileManager.default.fileExists(atPath:hit.path) else{return}
-        previewURL=URL(fileURLWithPath:hit.path) as NSURL
+        guard let hit=model.selected,let url=PreviewResolver.localURL(for:hit) else{return}
+        previewURL=url as NSURL
         guard let panel=QLPreviewPanel.shared() else{return}
         panel.dataSource=self;panel.reloadData();panel.level = .floating;panel.makeKeyAndOrderFront(nil)
     }

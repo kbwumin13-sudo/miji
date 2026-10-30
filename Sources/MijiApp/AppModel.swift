@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 import MijiCore
-import ImageIO
+import PDFKit
 
 private final class SearchTicket: @unchecked Sendable {
     private let lock = NSLock()
@@ -29,8 +29,15 @@ final class AppModel: ObservableObject {
     @Published var searchMilliseconds:Double = 0
     @Published var message: String?
     @Published var previewText = ""
-    @Published var previewImage: NSImage?
     @Published var previewWarning: String?
+    @Published var previewPage: Int?
+    @Published var previewLine: Int?
+    @Published var previewLocalURL: URL?
+    @Published var previewPDF: PDFDocument?
+    @Published var previewLoading = false
+    @Published var previewEnabled = true { didSet { loadPreview() } }
+    @Published var gridEnabled = false
+    @Published var searchPresented = false
     @Published var showSettings = false
     @Published var focusSearch = UUID()
     let database: SearchDatabase?
@@ -41,7 +48,9 @@ final class AppModel: ObservableObject {
     private let nameEngine: NameSearchEngine?
     private let contentQueue = DispatchQueue(label:"local.miji.content-search",qos:.userInitiated)
     private let previewQueue = DispatchQueue(label:"local.miji.preview",qos:.utility)
-    private var previewVisible = false
+    private var previewTicket: SearchTicket?
+    private var previewKey: String?
+    private var previewQuery = ""
     private var activityWork: DispatchWorkItem?
     let service: IndexService?
     private let searchQueue = DispatchQueue(label:"local.miji.search",qos:.userInitiated)
@@ -63,7 +72,9 @@ final class AppModel: ObservableObject {
     static func panelHeight(query: String, resultCount: Int) -> CGFloat {
         query.isEmpty ? 100 : CGFloat(150 + min(7, max(2, resultCount)) * 59)
     }
-    var panelHeight: CGFloat { Self.panelHeight(query: query, resultCount: hits.count) }
+    var panelHeight: CGFloat { query.isEmpty ? 100 : (previewEnabled || gridEnabled ? 563 : Self.panelHeight(query: query, resultCount: hits.count)) }
+    var gridColumns:Int {max(1,Int((panelWidth - (previewEnabled ? 360 : 0) - 24)/180))}
+    var panelWidth: CGFloat { !query.isEmpty && previewEnabled ? 1060 : 800 }
 
     init(searchExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])? = nil,
          supplementaryExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])? = nil) {
@@ -136,7 +147,7 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos:.utility).async { try? engine.completeUpgrade(cancelled:{lifetime.isCancelled}) }
     }
     func prepareForTermination(completion:@escaping ()->Void) {
-        lifetimeTicket.cancel();searchTicket?.cancel();searchWork?.cancel();refreshWork?.cancel();activityWork?.cancel()
+        lifetimeTicket.cancel();searchTicket?.cancel();previewTicket?.cancel();searchWork?.cancel();refreshWork?.cancel();activityWork?.cancel()
         service?.stop()
         let engine=nameEngine
         searchQueue.async {
@@ -176,10 +187,14 @@ final class AppModel: ObservableObject {
     }
     func setSearchVisible(_ visible:Bool) {
         searchVisible=visible
+        searchPresented=visible
+        loadPreview()
+        if !visible { PreviewThumbnails.clear() }
         scheduleSearch()
         if visible { scheduleRefresh() }
     }
     func scheduleSearch() {
+        if previewQuery != query {previewTicket?.cancel();previewKey=nil}
         searchWork?.cancel(); searchWork=nil; searchTicket?.cancel(); searching=false; searchNeedsRefresh=false
         activityWork?.cancel()
         let token=UUID(); searchToken=token
@@ -273,6 +288,7 @@ final class AppModel: ObservableObject {
         hits=result; searching = !finished
         if let elapsed { searchMilliseconds=elapsed }
         if !result.contains(where:{$0.id==selectedID}) { selectedID=result.first?.id }
+        else { loadPreview() }
         if finished && searchNeedsRefresh { scheduleSearch() }
     }
     private func searchFailed(_ error:Error,token:UUID,ticket:SearchTicket) {
@@ -280,22 +296,37 @@ final class AppModel: ObservableObject {
         searching=false
         if !(error is CancellationError) { message=error.localizedDescription }
     }
-    func setPreviewVisible(_ visible:Bool) { previewVisible=visible; loadPreview() }
     func loadPreview() {
-        previewText=""; previewImage=nil; previewWarning=nil
-        guard previewVisible,let hit=selected,let database=previewDatabase else { return }
-        let id=hit.id
+        guard searchVisible,previewEnabled,let hit=selected,let database=previewDatabase else {
+            previewTicket?.cancel();previewKey=nil;clearPreview();return
+        }
+        let key="\(hit.id)|\(hit.path)|\(hit.file.inode)|\(hit.file.modified)|\(hit.file.size)|\(hit.file.contentState)|\(hit.file.contentError ?? "")|\(hit.root.isOnline)|\(query)|\(hit.matchedIn)|\(hit.snippet)|\(hit.labels)"
+        guard key != previewKey else{return}
+        previewTicket?.cancel();previewKey=key;previewQuery=query;clearPreview()
+        let ticket=SearchTicket();previewTicket=ticket;previewLoading=true
+        let query=query
         previewQueue.async { [weak self] in
-            let content=try? database.storedContent(fileID:id)
-            var thumbnail:NSImage?
-            if hit.file.kind == .image && hit.root.isOnline,
-               let source=CGImageSourceCreateWithURL(URL(fileURLWithPath:hit.path) as CFURL,nil),
-               let cg=CGImageSourceCreateThumbnailAtIndex(source,0,[kCGImageSourceCreateThumbnailFromImageAlways:true,kCGImageSourceThumbnailMaxPixelSize:700,kCGImageSourceCreateThumbnailWithTransform:true] as CFDictionary) { thumbnail=NSImage(cgImage:cg,size:.zero) }
+            guard !ticket.isCancelled else{return}
+            let content=try? database.storedContent(fileID:hit.id)
+            var resolution=PreviewResolver.resolve(hit:hit,content:content,query:query,cancelled:{ticket.isCancelled})
+            guard !ticket.isCancelled else{return}
+            let localURL=PreviewResolver.localURL(for:hit)
+            if (hit.file.kind == .code || hit.file.fileExtension.lowercased()=="pdf"),let url=localURL,
+               let signature=try? FileSignature.read(url),!signature.matches(hit.file) {
+                resolution.page=nil;resolution.line=nil
+                resolution.warning=[resolution.warning,"文件已变化，正文为上次索引内容；位置将在索引更新后恢复"].compactMap{$0}.joined(separator:"；")
+            }
+            var document:PDFDocument?
+            if hit.file.fileExtension.lowercased()=="pdf",let url=localURL,let size=try? url.resourceValues(forKeys:[.fileSizeKey]).fileSize,size<=64*1024*1024 {document=PDFDocument(url:url)}
             DispatchQueue.main.async {
-                guard let self,self.previewVisible,self.selectedID==id else { return }
-                self.previewText=String((content?.text ?? hit.snippet).prefix(16000)); self.previewImage=thumbnail; self.previewWarning=content?.warning
+                guard let self,!ticket.isCancelled,self.searchVisible,self.selectedID==hit.id else { return }
+                self.previewText=resolution.text;self.previewWarning=resolution.warning
+                self.previewLocalURL=localURL;self.previewPage=resolution.page;self.previewLine=resolution.line;self.previewPDF=document;self.previewLoading=false
             }
         }
+    }
+    private func clearPreview() {
+        previewText="";previewWarning=nil;previewPage=nil;previewLine=nil;previewPDF=nil;previewLocalURL=nil;previewLoading=false
     }
     func addFolder() {
         let panel=NSOpenPanel(); panel.canChooseDirectories=true; panel.canChooseFiles=false; panel.allowsMultipleSelection=true; panel.prompt="加入索引"; panel.message="选择文件夹或磁盘。内容只保存在这台 Mac。"
@@ -331,6 +362,7 @@ final class AppModel: ObservableObject {
     func openSelected() {
         guard let hit=selected else { return }
         guard hit.root.isOnline, FileManager.default.fileExists(atPath:hit.path) else { message="请连接「\(hit.root.name)」后打开此文件。"; return }
+        if hit.file.kind == .code,let line=previewLine,CodeFileOpener.open(URL(fileURLWithPath:hit.path),line:line) {recordOpen(hit.id);return}
         if !NSWorkspace.shared.open(URL(fileURLWithPath:hit.path)) { message="未能打开此文件，请检查文件是否仍存在。"; return }
         recordOpen(hit.id)
     }
@@ -345,6 +377,10 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos:.utility).async { engine?.recordOpen(id) }
     }
     func copySelectedPath() { guard let hit=selected else { return }; NSPasteboard.general.clearContents(); NSPasteboard.general.setString(hit.path,forType:.string) }
+    func copySelectedFile(to pasteboard:NSPasteboard = .general) {
+        guard let hit=selected,let url=PreviewResolver.localURL(for:hit) else {message="请先连接磁盘或将文件下载到本机。";return}
+        pasteboard.clearContents();pasteboard.writeObjects([url as NSURL])
+    }
     func moveSelection(_ step:Int) {
         guard !hits.isEmpty else { return }
         let current=hits.firstIndex { $0.id==selectedID } ?? (step>0 ? -1 : hits.count)

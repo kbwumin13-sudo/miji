@@ -71,6 +71,7 @@ final class SearchSchedulingTests: XCTestCase {
             return try database.searchSupplementary(query,options:options,cancelled:cancelled)
         })
         defer {model.service?.stop()}
+        model.previewEnabled=false
         model.setSearchVisible(true); model.query="数学"
         for _ in 0..<100 where !gate.isCaptured {try await Task.sleep(nanoseconds:10_000_000)}
         XCTAssertTrue(gate.isCaptured)

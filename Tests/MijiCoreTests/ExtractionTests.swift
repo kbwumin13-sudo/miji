@@ -208,6 +208,10 @@ final class ExtractionTests: XCTestCase {
         let result = try ContentExtractor.extract(url: pdf("mixed.pdf", selectablePages: 11, rasterText: "MIXED OCR PROBE 9281"))
         XCTAssertEqual(result.pages, 12); XCTAssertTrue(result.text.contains("Selectable page 11"))
         XCTAssertTrue(result.text.contains("MIXED OCR PROBE"), result.text); XCTAssertNil(result.warning)
+        let range = try XCTUnwrap(result.pageRanges?.first { $0.page == 12 })
+        let bytes = Array(result.text.utf8)
+        let pageText = try XCTUnwrap(String(bytes: bytes[range.utf8Offset..<(range.utf8Offset + range.utf8Length)], encoding: .utf8))
+        XCTAssertTrue(pageText.contains("MIXED OCR PROBE"), "扫描页OCR必须保存原始页码及正确UTF8范围")
     }
 
     func testDisabledPDFOCRWarnsForMissingTextLayer() throws {

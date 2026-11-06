@@ -20,6 +20,13 @@ enum SearchPreviewPolicy {
         hit.file.kind == .code || (hit.file.kind == .document && ["txt", "md", "markdown", "csv", "tsv", "log"].contains(hit.file.fileExtension.lowercased()))
     }
 
+    /// Keep local-file previews available before indexing finishes or after an
+    /// extraction failure. This renders the selected original without extracting it.
+    static func usesSystemPreview(_ hit: SearchHit, hasIndexedText: Bool) -> Bool {
+        (hit.file.kind == .document || hit.file.kind == .code) && hit.file.fileExtension.lowercased() != "pdf" &&
+            !(usesTextReader(hit) && hasIndexedText)
+    }
+
     static func hasContent(_ hit: SearchHit) -> Bool {
         switch hit.file.kind {
         case .image, .document, .code, .audio, .video: return true

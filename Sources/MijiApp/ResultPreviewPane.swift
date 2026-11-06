@@ -92,7 +92,7 @@ struct ResultPreviewPane: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 indexedDisclosure(hit)
             }
-        } else if let url = model.previewLocalURL, hit.file.kind == .image || hit.file.kind == .audio || hit.file.kind == .video || (hit.file.kind == .document && hit.file.fileExtension.lowercased() != "pdf" && !SearchPreviewPolicy.usesTextReader(hit)) {
+        } else if let url = model.previewLocalURL, hit.file.kind == .image || hit.file.kind == .audio || hit.file.kind == .video || SearchPreviewPolicy.usesSystemPreview(hit, hasIndexedText: !model.previewText.isEmpty) {
             VStack(spacing: 8) {
                 Group {
                     if hit.file.kind == .image { FileThumbnail(hit: hit, pixels: 800, showsStatus: true) }

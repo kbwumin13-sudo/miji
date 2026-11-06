@@ -35,9 +35,9 @@ struct MainView:View {
                 HStack(spacing:0) {
                     if model.searchPresented {results.frame(maxWidth:.infinity,maxHeight:.infinity)}
                     else {Color.clear.frame(maxWidth:.infinity,maxHeight:.infinity)}
-                    if model.previewEnabled && model.searchPresented {
+                    if model.previewVisible {
                         Divider()
-                        ResultPreviewPane(model:model).frame(width:360)
+                        ResultPreviewPane(model:model).frame(width:AppModel.previewWidth)
                     }
                 }
             }
@@ -102,7 +102,12 @@ struct MainView:View {
                 if expanded {
                     Text("↩ 打开    ⌘↩ 定位")
                     Button {model.gridEnabled.toggle();searchFocused=false} label:{Image(systemName:model.gridEnabled ? "list.bullet" : "square.grid.2x2")}.buttonStyle(.plain).help("切换列表／网格").accessibilityLabel("切换列表／网格")
-                    Button {model.previewEnabled.toggle()} label:{Image(systemName:"sidebar.right")}.buttonStyle(.plain).help("显示／隐藏预览栏").accessibilityLabel("显示／隐藏预览栏")
+                    Menu {
+                        Picker("预览栏",selection:$model.previewMode) {
+                            ForEach(SearchPreviewMode.allCases) {mode in Text(mode.title).tag(mode)}
+                        }
+                    } label:{Image(systemName:"sidebar.right").foregroundStyle(model.previewVisible ? Color.accentColor : .secondary)}
+                    .menuStyle(.borderlessButton).fixedSize().help("预览栏：\(model.previewMode.title)").accessibilityLabel("预览栏：\(model.previewMode.title)")
                     Button("⌘Y 预览"){AppDelegate.shared?.preview()}.buttonStyle(.plain)
                 } else {Text("⌃⌥Space 唤起")}
                 Button {showHelp.toggle()} label:{Image(systemName:"questionmark.circle")}.buttonStyle(.plain).popover(isPresented:$showHelp) {
@@ -145,6 +150,7 @@ private struct CompactResultRow:View {
             }.font(.system(size:10)).foregroundStyle(.secondary)
         }.padding(.horizontal,15).frame(height:57)
         .background(selected ? Color.accentColor.opacity(0.27) : .clear,in:RoundedRectangle(cornerRadius:10))
+        .help(hit.path)
         .accessibilityElement(children:.combine).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
@@ -154,9 +160,11 @@ private struct ResultGridCell:View {
     let selected:Bool
     var body:some View {
         VStack(alignment:.leading,spacing:7) {
-            if hit.root.isOnline {
+            if hit.root.isOnline && SearchPreviewPolicy.hasContent(hit) {
                 FileThumbnail(hit:hit).frame(maxWidth:.infinity).frame(height:108)
-            } else {Image(systemName:"externaldrive.badge.exclamationmark").font(.largeTitle).frame(maxWidth:.infinity).frame(height:108).foregroundStyle(.secondary)}
+            } else {
+                Image(nsImage:FileIconCache.icon(hit)).resizable().scaledToFit().frame(width:40,height:40).frame(maxWidth:.infinity).frame(height:108)
+            }
             Text(highlightedPreview(hit.file.name,query:query)).font(.system(size:12,weight:.medium)).lineLimit(1)
             Text(hit.root.isOnline ? hit.file.kind.title : "未连接").font(.system(size:10)).foregroundStyle(.secondary)
         }.padding(10).frame(maxWidth:.infinity,alignment:.leading)

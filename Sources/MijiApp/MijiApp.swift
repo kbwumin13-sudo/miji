@@ -44,7 +44,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         panel.contentView=NSHostingView(rootView:MainView(model:model))
         searchPanel=panel
         model.openMain={ [weak self] in self?.showSearch() }
-        Publishers.CombineLatest4(model.$query,model.$hits,model.$previewEnabled,model.$gridEnabled).sink{[weak self] _ in
+        Publishers.CombineLatest4(model.$query,model.$hits,model.$previewMode,model.$gridEnabled).sink{[weak self] _ in
             // @Published emits before assignment; size using the completed model state.
             DispatchQueue.main.async {self?.resizeSearchPanel()}
         }.store(in:&subscriptions)
@@ -57,7 +57,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         var event=EventTypeSpec(eventClass:OSType(kEventClassKeyboard),eventKind:UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(),{_,_,_ in DispatchQueue.main.async{AppDelegate.shared?.toggleSearch()};return noErr},1,&event,nil,&handler)
         let keyID=EventHotKeyID(signature:OSType(0x4d494a49),id:1)
-        let status=RegisterEventHotKey(UInt32(kVK_Space),UInt32(controlKey | optionKey),keyID,GetApplicationEventTarget(),0,&hotKey)
+        let status:OSStatus = ProcessInfo.processInfo.environment["MIJI_UI_TESTING"] == "1" ? noErr : RegisterEventHotKey(UInt32(kVK_Space),UInt32(controlKey | optionKey),keyID,GetApplicationEventTarget(),0,&hotKey)
         NSLog("Miji launched; hotkey status %d",status)
         if status != noErr {model.message="全局快捷键 ⌃⌥Space 已被占用。仍可从菜单栏打开觅迹。"}
         monitor=NSEvent.addLocalMonitorForEvents(matching:.keyDown){[weak self] event in

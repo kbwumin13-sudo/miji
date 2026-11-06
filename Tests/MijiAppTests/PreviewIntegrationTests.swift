@@ -6,6 +6,42 @@ import MijiCore
 
 final class PreviewIntegrationTests: XCTestCase {
     @MainActor
+    func testOfflineTextSurvivesAndExplicitHideCancelsPendingPreview() async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let oldDir=getenv("MIJI_DATA_DIR").map{String(cString:$0)},oldAuto=getenv("MIJI_NO_AUTOSTART").map{String(cString:$0)}
+        setenv("MIJI_DATA_DIR",directory.path,1);setenv("MIJI_NO_AUTOSTART","1",1)
+        defer {
+            if let oldDir {setenv("MIJI_DATA_DIR",oldDir,1)}else{unsetenv("MIJI_DATA_DIR")}
+            if let oldAuto {setenv("MIJI_NO_AUTOSTART",oldAuto,1)}else{unsetenv("MIJI_NO_AUTOSTART")}
+            try? FileManager.default.removeItem(at:directory)
+        }
+        let db=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+        let root=IndexedRoot(id:"r",path:"/missing-preview-disk",isOnline:false)
+        try db.saveRoot(root)
+        try db.upsertFiles([FileRecord(rootID:"r",relativePath:"needle.swift",name:"needle.swift",fileExtension:"swift",kind:.code,size:1,modified:1)],generation:1)
+        let record=try XCTUnwrap(db.pendingFiles(rootID:"r").first)
+        XCTAssertTrue(try db.completeContent(file:record,content:ExtractedContent(text:"first\nneedle\nlast")))
+        let hit=SearchHit(file:record,root:root)
+        let model=AppModel(searchExecutor:{_,_,_,_ in [hit]});defer{model.service?.stop()}
+        model.setSearchVisible(true);model.query="needle"
+        for _ in 0..<100 where model.previewText.isEmpty {try await Task.sleep(nanoseconds:10_000_000)}
+        XCTAssertTrue(model.previewText.contains("needle"));XCTAssertNil(model.previewLocalURL)
+        let width=model.panelWidth,height=model.panelHeight
+        XCTAssertTrue(model.previewVisible);XCTAssertEqual(model.previewLine,2)
+        model.previewMode = .hidden
+        XCTAssertTrue(model.previewText.isEmpty)
+        model.previewMode = .shown
+        model.previewMode = .hidden
+        try await Task.sleep(nanoseconds:100_000_000)
+        XCTAssertTrue(model.previewText.isEmpty);XCTAssertFalse(model.previewLoading)
+        model.previewMode = .automatic
+        for _ in 0..<100 where model.previewText.isEmpty {try await Task.sleep(nanoseconds:10_000_000)}
+        XCTAssertTrue(model.previewText.contains("needle"))
+        XCTAssertEqual(model.panelWidth,width);XCTAssertEqual(model.panelHeight,height)
+        model.setSearchVisible(false)
+    }
+
+    @MainActor
     func testSameSelectionKeepsLoadedPreviewAndHideReleasesIt() async throws {
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let oldDir=getenv("MIJI_DATA_DIR").map{String(cString:$0)},oldAuto=getenv("MIJI_NO_AUTOSTART").map{String(cString:$0)}

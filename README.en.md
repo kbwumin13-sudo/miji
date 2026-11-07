@@ -80,6 +80,8 @@ Requirements: Apple Silicon, macOS 14 or later.
 
 In 1.2.0, the collapsible right pane previews pictures, PDFs, Office documents, source code and media. It highlights matching text and shows why the result matched. The footer switches between a list and a thumbnail grid. Media plays on demand and stops when the preview closes or the selection changes.
 
+In 1.2.1, Automatic preview keeps application, folder, archive and other metadata-only searches in a compact list. Pictures, documents, code and media retain the content pane. The footer menu offers Automatic / Show / Hide; an explicit choice stays in effect for subsequent searches. The result set determines the layout, so selection changes and loading failures do not resize the window. File actions and path copying remain visible while text and code scroll separately. Offline results use stored content; previews never automatically unpack, download or re-extract files.
+
 PDF results can show the matching page and open it in a separate reading window. Newly extracted PDFs store page locations for both selectable text and OCR; older selectable PDFs find their page on demand. Existing scanned PDFs keep their indexed text and gain page locations when re-extracted. The upgrade does not rebuild the index. Code previews show matching lines, and open at that line when VS Code, VS Code Insiders or Cursor is the default editor. If the file changed since indexing, stale locations are disabled until its index catches up.
 
 ## Search syntax

@@ -2,9 +2,9 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-10-14
+- Last refreshed: 2026-11-07
 - Primary product surfaces: 觅迹（Miji）原生 Mac 文件搜索、范围与后台索引设置。
-- Evidence reviewed: 用户对图片文字/内容、文档全文、外置盘离线搜索的实施请求；artifacts/oil-find-1.6.2/分析结论.md。
+- Evidence reviewed: 用户对图片文字/内容、文档全文、外置盘离线搜索的实施请求；1.2.0 搜索/预览实现；用户提供的应用筛选截图（4 个 ChatGPT.app，预览只有空图标和文件信息）。
 
 ## Brand
 - Personality: 安静、清晰、工具感；独立品牌“觅迹”。
@@ -41,7 +41,9 @@
 
 ## Components
 - Existing components to reuse: SwiftUI紧凑列表、NSVisualEffectView、AppKit NSOpenPanel/QuickLook。
-- New/changed components: 轻量浮窗、系统文件图标、关键词高亮、独立设置窗、按需内容浮层。
+- New/changed components: 轻量浮窗、系统文件图标、关键词高亮、独立设置窗；搜索预览采用固定文件头/操作、可滚动内容、底部路径与复制入口。
+- 预览模式为「自动／显示／隐藏」，显式模式在后续搜索与类型切换中保持；Quick Look 快捷键始终独立可用。
+- 自动模式只依据整组结果元数据：图片、文档、代码、音视频以及有正文摘要的其他文件保留预览；仅有应用、文件夹、压缩包和无正文未知类型时收起。无需额外探测、枚举、解包或提取。
 - Variants and states: 扫描/提取/暂停/完成/离线/权限不足。
 - Token/component ownership: 主线程维护应用界面。
 
@@ -53,14 +55,15 @@
 - Reduced motion and sensory considerations: 无自定义强制动画。
 
 ## Responsive behavior
-- Supported breakpoints/devices: macOS14+，浮窗宽800pt；无搜索词时100pt高，输入后随结果数量在268–563pt之间变化。
-- Layout adaptations: 搜索框随输入展开结果；无常驻详情面板。
+- Supported breakpoints/devices: macOS14+；紧凑列表宽800pt，高度随结果数在268–563pt间变化；内容预览总宽1060pt，右栏440pt，高563pt；空搜索框800×100pt。
+- Layout adaptations: 整组结果与显式模式决定是否分栏；选择、加载、离线与失败不改变窗口尺寸。无结果不显示预览；网格保留用户选择。
+- 纯文本和代码直接使用正文阅读区；PDF/图片/Office/媒体保留原文视图，已索引文字可展开。失败/离线回退已索引内容，路径及操作固定可访问。
 - Touch/hover differences: 面向键鼠。
 
 ## Interaction states
-- Loading: 显示当前阶段与累计文件数。
+- Loading: 索引显示阶段与累计文件数；选中预览与缩略图显示载入状态，取消的回调不能回写其他选择。
 - Empty: 区分索引为空、无匹配、被过滤的结果。
-- Error: 保留可搜索内容，展示权限/解析错误并可重试。
+- Error: 保留可搜索及已索引内容；原文不可用、PDF 加密/过大/无法读取、缩略图失败、媒体播放失败分别提示，并保留打开与快速查看入口。
 - Success: 状态栏报告文件与内容计数。
 - Disabled: 未连接文件不能打开但可复制原路径。
 - Offline/slow network: 外置盘未连接仍检索已保存目录与内容；应用无联网需求。

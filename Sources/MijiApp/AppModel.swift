@@ -35,7 +35,13 @@ final class AppModel: ObservableObject {
     @Published var previewLocalURL: URL?
     @Published var previewPDF: PDFDocument?
     @Published var previewLoading = false
-    @Published var previewEnabled = true { didSet { loadPreview() } }
+    @Published var previewMode = SearchPreviewMode.automatic { didSet { loadPreview() } }
+    // Compatibility for callers that explicitly enable/disable the pane.
+    var previewEnabled: Bool {
+        get { previewMode != .hidden }
+        set { previewMode = newValue ? .shown : .hidden }
+    }
+    var previewVisible: Bool { searchPresented && SearchPreviewPolicy.showsPane(mode: previewMode, hits: hits) }
     @Published var gridEnabled = false
     @Published var searchPresented = false
     @Published var showSettings = false
@@ -72,9 +78,10 @@ final class AppModel: ObservableObject {
     static func panelHeight(query: String, resultCount: Int) -> CGFloat {
         query.isEmpty ? 100 : CGFloat(150 + min(7, max(2, resultCount)) * 59)
     }
-    var panelHeight: CGFloat { query.isEmpty ? 100 : (previewEnabled || gridEnabled ? 563 : Self.panelHeight(query: query, resultCount: hits.count)) }
-    var gridColumns:Int {max(1,Int((panelWidth - (previewEnabled ? 360 : 0) - 24)/180))}
-    var panelWidth: CGFloat { !query.isEmpty && previewEnabled ? 1060 : 800 }
+    static let previewWidth: CGFloat = 440
+    var panelHeight: CGFloat { query.isEmpty ? 100 : (previewVisible || gridEnabled ? 563 : Self.panelHeight(query: query, resultCount: hits.count)) }
+    var gridColumns:Int {max(1,Int((panelWidth - (previewVisible ? Self.previewWidth : 0) - 24)/180))}
+    var panelWidth: CGFloat { !query.isEmpty && previewVisible ? 1060 : 800 }
 
     init(searchExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])? = nil,
          supplementaryExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])? = nil) {
@@ -297,7 +304,7 @@ final class AppModel: ObservableObject {
         if !(error is CancellationError) { message=error.localizedDescription }
     }
     func loadPreview() {
-        guard searchVisible,previewEnabled,let hit=selected,let database=previewDatabase else {
+        guard searchVisible,previewVisible,let hit=selected,SearchPreviewPolicy.hasContent(hit),let database=previewDatabase else {
             previewTicket?.cancel();previewKey=nil;clearPreview();return
         }
         let key="\(hit.id)|\(hit.path)|\(hit.file.inode)|\(hit.file.modified)|\(hit.file.size)|\(hit.file.contentState)|\(hit.file.contentError ?? "")|\(hit.root.isOnline)|\(query)|\(hit.matchedIn)|\(hit.snippet)|\(hit.labels)"
@@ -317,7 +324,14 @@ final class AppModel: ObservableObject {
                 resolution.warning=[resolution.warning,"文件已变化，正文为上次索引内容；位置将在索引更新后恢复"].compactMap{$0}.joined(separator:"；")
             }
             var document:PDFDocument?
-            if hit.file.fileExtension.lowercased()=="pdf",let url=localURL,let size=try? url.resourceValues(forKeys:[.fileSizeKey]).fileSize,size<=64*1024*1024 {document=PDFDocument(url:url)}
+            if hit.file.fileExtension.lowercased()=="pdf",let url=localURL {
+                let size=try? url.resourceValues(forKeys:[.fileSizeKey]).fileSize
+                if let size, size<=64*1024*1024 {
+                    document=PDFDocument(url:url)
+                    if document?.isLocked == true { document=nil;resolution.warning="PDF 已加密，无法显示原文预览" }
+                    else if document == nil { resolution.warning="PDF 无法读取，显示已索引内容" }
+                } else { resolution.warning="PDF 较大，使用快速查看打开原文件" }
+            }
             DispatchQueue.main.async {
                 guard let self,!ticket.isCancelled,self.searchVisible,self.selectedID==hit.id else { return }
                 self.previewText=resolution.text;self.previewWarning=resolution.warning

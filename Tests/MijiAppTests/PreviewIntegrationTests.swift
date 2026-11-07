@@ -6,6 +6,80 @@ import MijiCore
 
 final class PreviewIntegrationTests: XCTestCase {
     @MainActor
+    func testReadableTextWithoutIndexedBodyKeepsOriginalPreview() async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let oldDir=getenv("MIJI_DATA_DIR").map{String(cString:$0)},oldAuto=getenv("MIJI_NO_AUTOSTART").map{String(cString:$0)}
+        setenv("MIJI_DATA_DIR",directory.path,1);setenv("MIJI_NO_AUTOSTART","1",1)
+        defer {
+            if let oldDir {setenv("MIJI_DATA_DIR",oldDir,1)}else{unsetenv("MIJI_DATA_DIR")}
+            if let oldAuto {setenv("MIJI_NO_AUTOSTART",oldAuto,1)}else{unsetenv("MIJI_NO_AUTOSTART")}
+            try? FileManager.default.removeItem(at:directory)
+        }
+        let db=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+        let root=IndexedRoot(id:"r",path:directory.path);try db.saveRoot(root)
+        for ext in ["txt","md"] {
+            for failed in [false,true] {
+                let name="unindexed-\(failed).\(ext)",url=directory.appendingPathComponent("unindexed-\(failed).\(ext)")
+                let original=Data("# Local original\nNot yet in the content index.".utf8)
+                try original.write(to:url)
+                let signature=try FileSignature.read(url)
+                try db.upsertFiles([FileRecord(rootID:root.id,relativePath:name,name:name,fileExtension:ext,kind:.document,size:signature.size,modified:signature.modified,inode:signature.inode)],generation:1)
+                let pending=try XCTUnwrap(db.pendingFiles(rootID:root.id).first(where:{$0.name==name}))
+                if failed {try db.failContent(file:pending,message:"fixture extraction failed")}
+                let hit=try XCTUnwrap(db.search(name,options:SearchOptions(scope:.name)).first)
+                let state=hit.file.contentState
+                let model=AppModel(searchExecutor:{_,_,_,_ in [hit]})
+                model.setSearchVisible(true);model.query=name
+                for _ in 0..<100 where model.previewLocalURL==nil {try await Task.sleep(nanoseconds:10_000_000)}
+                XCTAssertTrue(model.previewVisible);XCTAssertFalse(model.previewLoading)
+                XCTAssertEqual(model.previewLocalURL,url);XCTAssertTrue(model.previewText.isEmpty)
+                XCTAssertTrue(SearchPreviewPolicy.usesSystemPreview(hit,hasIndexedText:!model.previewText.isEmpty))
+                XCTAssertFalse(SearchPreviewPolicy.usesSystemPreview(hit,hasIndexedText:true),"Ready indexed text keeps the dedicated reader")
+                XCTAssertNil(try db.storedContent(fileID:hit.id))
+                XCTAssertEqual(try db.search(name,options:SearchOptions(scope:.name)).first?.file.contentState,state)
+                XCTAssertEqual(try Data(contentsOf:url),original)
+                model.setSearchVisible(false);model.service?.stop()
+            }
+        }
+    }
+
+    @MainActor
+    func testOfflineTextSurvivesAndExplicitHideCancelsPendingPreview() async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let oldDir=getenv("MIJI_DATA_DIR").map{String(cString:$0)},oldAuto=getenv("MIJI_NO_AUTOSTART").map{String(cString:$0)}
+        setenv("MIJI_DATA_DIR",directory.path,1);setenv("MIJI_NO_AUTOSTART","1",1)
+        defer {
+            if let oldDir {setenv("MIJI_DATA_DIR",oldDir,1)}else{unsetenv("MIJI_DATA_DIR")}
+            if let oldAuto {setenv("MIJI_NO_AUTOSTART",oldAuto,1)}else{unsetenv("MIJI_NO_AUTOSTART")}
+            try? FileManager.default.removeItem(at:directory)
+        }
+        let db=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+        let root=IndexedRoot(id:"r",path:"/missing-preview-disk",isOnline:false)
+        try db.saveRoot(root)
+        try db.upsertFiles([FileRecord(rootID:"r",relativePath:"needle.swift",name:"needle.swift",fileExtension:"swift",kind:.code,size:1,modified:1)],generation:1)
+        let record=try XCTUnwrap(db.pendingFiles(rootID:"r").first)
+        XCTAssertTrue(try db.completeContent(file:record,content:ExtractedContent(text:"first\nneedle\nlast")))
+        let hit=SearchHit(file:record,root:root)
+        let model=AppModel(searchExecutor:{_,_,_,_ in [hit]});defer{model.service?.stop()}
+        model.setSearchVisible(true);model.query="needle"
+        for _ in 0..<100 where model.previewText.isEmpty {try await Task.sleep(nanoseconds:10_000_000)}
+        XCTAssertTrue(model.previewText.contains("needle"));XCTAssertNil(model.previewLocalURL)
+        let width=model.panelWidth,height=model.panelHeight
+        XCTAssertTrue(model.previewVisible);XCTAssertEqual(model.previewLine,2)
+        model.previewMode = .hidden
+        XCTAssertTrue(model.previewText.isEmpty)
+        model.previewMode = .shown
+        model.previewMode = .hidden
+        try await Task.sleep(nanoseconds:100_000_000)
+        XCTAssertTrue(model.previewText.isEmpty);XCTAssertFalse(model.previewLoading)
+        model.previewMode = .automatic
+        for _ in 0..<100 where model.previewText.isEmpty {try await Task.sleep(nanoseconds:10_000_000)}
+        XCTAssertTrue(model.previewText.contains("needle"))
+        XCTAssertEqual(model.panelWidth,width);XCTAssertEqual(model.panelHeight,height)
+        model.setSearchVisible(false)
+    }
+
+    @MainActor
     func testSameSelectionKeepsLoadedPreviewAndHideReleasesIt() async throws {
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let oldDir=getenv("MIJI_DATA_DIR").map{String(cString:$0)},oldAuto=getenv("MIJI_NO_AUTOSTART").map{String(cString:$0)}

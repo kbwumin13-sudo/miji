@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="430" viewBox="0 0 1120 430" role="img" aria-labelledby="title desc">
+  <title id="title">觅迹 Miji · Forgot the name? Follow the clues.</title>
+  <desc id="desc">Find files by pinyin, document text, and words in images. NATIVE macOS SEARCH · ON YOUR MAC</desc>
+  <defs>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#cdded5"/></pattern>
+    <clipPath id="bounds"><rect width="1120" height="430" rx="24"/></clipPath>
+  </defs>
+  <g clip-path="url(#bounds)">
+    <rect width="1120" height="430" fill="#f2f7f2"/>
+    <rect x="700" width="420" height="430" fill="url(#dots)"/>
+    <g fill="none" stroke="#cdded5" stroke-width="1.5">
+      <circle cx="946" cy="224" r="190"/><circle cx="946" cy="224" r="132"/>
+      <path d="M756 224h380M946 34v380" stroke-dasharray="4 8"/>
+    </g>
+    <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+      <g transform="translate(50 41)" fill="none" stroke="#087e65" stroke-width="3" stroke-linecap="round">
+        <circle cx="13" cy="13" r="11"/><path d="m21 21 10 10M9 10h8M9 15h5"/>
+      </g>
+      <text x="96" y="66" fill="#142e2a" font-size="25" font-weight="700" letter-spacing="1">觅迹 Miji</text>
+      <text x="50" y="164" fill="#142e2a" font-size="60" font-weight="700" letter-spacing="-1.5">Forgot the name?</text>
+      <text x="50" y="240" fill="#087e65" font-size="60" font-weight="700" letter-spacing="-1.5">Follow the clues.</text>
+      <text x="53" y="292" fill="#506d65" font-size="20">Find files by pinyin, document text, and words in images.</text>
+      <path d="M52 341h40" stroke="#087e65" stroke-width="3"/>
+      <text x="53" y="379" fill="#506d65" font-size="15" font-weight="600" letter-spacing="1.4">NATIVE macOS SEARCH · ON YOUR MAC</text>
+      <g transform="translate(771 150)">
+        <rect y="7" width="295" height="116" rx="19" fill="#cdded5"/>
+        <rect width="295" height="116" rx="19" fill="#ffffff" stroke="#cdded5" stroke-width="2"/>
+        <text x="147.5" y="72" text-anchor="middle" fill="#142e2a" font-size="34" font-weight="500">⌃ ⌥ Space</text>
+        <text x="147.5" y="157" text-anchor="middle" fill="#506d65" font-size="17">Your next search starts here</text>
+      </g>
+      <circle cx="946" cy="34" r="5" fill="#087e65"/>
+    </g>
+  </g>
+</svg>

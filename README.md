@@ -1,123 +1,176 @@
 <p align="center">
-  <img src="docs/assets/hero.png" alt="觅迹 Miji：一个搜索框，找遍整台 Mac" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/intro-zh-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/intro-zh-light.svg">
+    <img src="docs/assets/intro-zh-light.svg" alt="觅迹 Miji：文件名忘了，线索还在。用拼音、正文和截图里的字找回文件。" width="100%">
+  </picture>
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/latest"><img src="https://img.shields.io/github/v/release/kbwumin13-sudo/miji?display_name=tag&color=14b8a6&label=release" alt="最新版本"></a>
-  <img src="https://img.shields.io/badge/macOS-14%2B-0b1f22?logo=apple&logoColor=white" alt="macOS 14+">
-  <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-0b1f22" alt="Apple Silicon">
-  <img src="https://img.shields.io/badge/Swift-5.9-F05138?logo=swift&logoColor=white" alt="Swift 5.9">
-  <img src="https://img.shields.io/badge/privacy-100%25%20local-0d9488" alt="完全本地">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb" alt="MIT License"></a>
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/latest"><img src="https://img.shields.io/github/v/release/kbwumin13-sudo/miji?display_name=tag&color=087e65&label=release" alt="最新版本"></a>
+  <img src="https://img.shields.io/badge/macOS-14%2B-172f2a?logo=apple&logoColor=white" alt="macOS 14 或更新版本">
+  <img src="https://img.shields.io/badge/Apple_Silicon-arm64-172f2a" alt="Apple Silicon arm64">
+  <img src="https://img.shields.io/badge/processing-on--device-087e65" alt="识别、索引与查询全部在本机完成">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-172f2a" alt="MIT License"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/latest"><b>下载</b></a> ·
-  <a href="#快速开始"><b>快速开始</b></a> ·
-  <a href="#搜索语法"><b>搜索语法</b></a> ·
-  <a href="#性能"><b>性能</b></a> ·
-  <a href="#工作原理"><b>工作原理</b></a> ·
-  <a href="README.en.md"><b>English</b></a>
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/latest"><b>下载觅迹 ↗</b></a> &nbsp; · &nbsp;
+  <a href="#快速开始">快速开始</a> &nbsp; · &nbsp;
+  <a href="#搜索语法">搜索语法</a> &nbsp; · &nbsp;
+  <a href="README.en.md">English</a>
 </p>
 
-按下 `⌃⌥Space`，输入 `sxfx` 找到《数学分析》复习提纲，输入「拉格朗日」翻出课件截图，输入「鸟」找到一张没有任何文字的鹦鹉照片。
+**觅迹是一款为中文文件设计的原生 Mac 搜索工具。** 记得文件名的一部分、文档里的一句话，或截图上的几个字，就从那里开始找。文件名、拼音、文档全文、图片文字与内容标签，都在一个搜索框里；识别、索引和查询全部在本机完成。
 
-**觅迹**是一款原生 macOS 搜索工具，为中文用户设计：文件名、拼音与首字母、PDF 和 Office 文档全文、图片里的文字与内容、已经拔掉的外置盘，都在同一个搜索框里。识别、索引和查询全部在你的 Mac 上完成，不联网。
+## 记得什么，就搜什么
 
-## 它能找到什么
+| 你还记得…… | 试着输入 | 觅迹帮你找 |
+| --- | --- | --- |
+| 「数学分析」，懒得切输入法 | `sxfx` / `shuxue` | 用拼音首字母或全拼匹配中文文件名 |
+| 课件讲过「拉格朗日」 | `拉格朗日 ext:pdf` | 从 PDF 正文里找，也包括经过 OCR 的扫描页 |
+| 截过一张图，上面有「考试安排」 | `考试安排 kind:图片` | 从图片里的文字找到截图 |
+| 拍过一只鸟，照片名字是 IMG… | `鸟 kind:图片` | 用本地识别的图片标签找到照片 |
+
+**硬盘拔了，线索还在。** 已索引的外置盘断开后，文件目录、提取的正文与图片标签仍能搜索。先查清文件在哪，再接上对应的盘打开它。
 
 <p align="center">
-  <img src="docs/assets/feature-pinyin.png" width="49%" alt="拼音首字母：输入 sxfx 找到「数学分析」">
-  <img src="docs/assets/feature-fulltext.png" width="49%" alt="文档全文：PDF、Word、PowerPoint、Excel 与 iWork 正文">
+  <img src="docs/assets/demo.gif" width="100%" alt="觅迹实机演示：依次用拼音首字母、图片文字、图片标签和文档全文搜索">
 </p>
-<p align="center">
-  <img src="docs/assets/feature-ocr.png" width="49%" alt="图片文字：截图和扫描件里的字，可对照原图与识别结果">
-  <img src="docs/assets/feature-labels.png" width="49%" alt="图片内容：按标签找到没有文字的照片">
+<p align="center"><sub>实机演示录制于 1.1.0，使用虚构课程资料；界面、结果与耗时来自实际运行。1.2.0 新增的预览功能见下文。</sub></p>
+
+## 找到之后，少打开几个窗口
+
+[1.2.0](docs/releases/1.2.0.md) 把文件预览带进了搜索窗口。选中结果，就能看看是不是要找的那一份。
+
+- **文档直接看命中处**：摘要高亮关键词，PDF 定位匹配页，并可打开独立阅读窗口。
+- **代码直接看命中行**：默认编辑器是 VS Code、VS Code Insiders 或 Cursor 时，可打开到对应行。
+- **图片可以翻，音视频可以播**：列表与缩略图网格随时切换，媒体点击后播放，切换结果或收起预览时停止。
+- **键盘顺手接着用**：`Return` 打开，`⌘Return` 在 Finder 中显示，`⌘C` 复制文件，`⌘⇧C` 复制路径。
+
+<details>
+<summary>展开看拼音、全文、OCR 与图片标签的搜索效果</summary>
+
+<p>
+  <img src="docs/assets/feature-pinyin.png" width="49%" alt="拼音搜索：sxfx 匹配数学分析">
+  <img src="docs/assets/feature-fulltext.png" width="49%" alt="文档全文搜索：从正文中找到关键词">
+</p>
+<p>
+  <img src="docs/assets/feature-ocr.png" width="49%" alt="图片 OCR：对照原图与识别文字">
+  <img src="docs/assets/feature-labels.png" width="49%" alt="图片标签：搜索没有文字的照片">
 </p>
 
-- **默认覆盖整台 Mac**：从 `/` 开始建立索引，系统目录、隐藏文件和资源库都在范围内；应用包和文档包按一个条目处理。
-- **拔掉的外置盘照样能搜**：外置盘按卷 UUID 单独建索引，断开后目录、正文和标签仍保存在本机，结果标为「未连接」；重新接入时自动恢复，挂载路径变了也能认回。
-- **边输入边出结果**：文件名结果先显示，正文命中分批补充；改词或收起窗口时，旧查询立即取消。
-- **常用的文件排在前面**：完全匹配和前缀匹配优先，自己的文件排在资源库、系统与依赖目录之前，最近从觅迹打开过的文件也会上浮。
-- **只更新变化的部分**：FSEvents 事件游标持久保存，只重扫发生变化的路径；重启后从上次位置回放，事件丢失时才回退全量扫描。
-- **单个文件出错不影响整体**：OCR、PDF 与 iWork 解析在随应用分发的独立进程里逐个运行，单个文件超过 180 秒即终止并记录，后续文件继续处理。
+以上为 1.1.0 的功能展示，使用虚构课程资料，不展示新版预览布局。
 
-## 边输入，边出结果
+</details>
 
-<p align="center">
-  <img src="docs/assets/demo.gif" width="100%" alt="觅迹实时搜索演示：拼音首字母、图片文字、图片内容与全文">
-</p>
-<p align="center"><sub>演示文件为虚构的课程资料；界面、结果与耗时取自觅迹 1.1.0 实机运行。</sub></p>
+## 日常用起来，也照顾细节
+
+| 设计细节 | 用起来 |
+| --- | --- |
+| **中文输入更顺手** | 中文、全拼、首字母都能搜；完全匹配和前缀匹配优先。 |
+| **边输入，边出结果** | 文件名结果先显示，正文命中陆续补充；改词或收起窗口时取消旧查询。 |
+| **自己的文件靠前** | 个人文件优先于系统、资源库与依赖目录，最近从觅迹打开的文件也会上浮。 |
+| **从上次的地方继续** | 增量扫描发生变化的路径，重启后恢复名称缓存并回放文件事件。 |
+| **文件留在你的 Mac** | 无上传、无遥测；OCR 使用系统自带的 Apple Vision，本地建立和查询索引。 |
+
+默认从 `/` 建立索引，覆盖可访问的系统目录、隐藏文件与资源库；应用包、文档包按一个条目处理。云端占位文件只索引名称，不触发下载。识别类别与索引位置可在设置中管理，移除索引位置不会删除原文件。
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/kbwumin13-sudo/miji/releases/latest) 下载 `Miji-1.2.0-macOS-arm64.zip`，解压后把「觅迹.app」拖进「应用程序」。
-2. 觅迹使用 ad-hoc 签名，尚未经过 Apple 公证，首次打开时 macOS 会提示无法验证开发者或「已损坏」。在终端执行下面这行后再打开即可；如果只是提示无法验证，也可以先尝试打开一次，再到「系统设置 → 隐私与安全性」底部点「仍要打开」。
+**Apple Silicon · macOS 14 或更新版本**
+
+1. [下载最新发布版](https://github.com/kbwumin13-sudo/miji/releases/latest)，解压 `Miji-1.2.0-macOS-arm64.zip`，将「觅迹.app」拖入「应用程序」。
+2. **首次打开**：应用使用 ad-hoc 签名，尚未经过 Apple 公证。若提示无法验证开发者，先尝试打开一次，再到「系统设置 → 隐私与安全性」点击「仍要打开」。若提示「已损坏」，确认安装包来自本仓库的 Releases 后，在终端执行：
 
    ```sh
    xattr -dr com.apple.quarantine /Applications/觅迹.app
    ```
 
-3. 在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中启用「觅迹」并重新打开应用，「文稿」「桌面」等受保护目录才会被索引。
-4. 按 `⌃⌥Space` 唤起搜索，菜单栏的放大镜也能打开。首次运行先建立文件名目录，期间即可搜索；图片和文档内容在后台分批识别，进度在「索引与设置」中查看。
+3. 在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中启用「觅迹」，然后重新打开应用，以索引「文稿」「桌面」等受保护目录。
+4. 按 **`⌃⌥Space`**（Control + Option + 空格）唤起搜索，或点击菜单栏放大镜。首次运行先建立文件名目录，期间即可搜索；图片和文档内容随后在后台分批识别，进度可在「索引与设置」中查看。
 
-系统要求：Apple Silicon，macOS 14 或更新版本。
+下载页同时提供 SHA-256 校验文件。升级保留现有索引、扫描范围和设置，无需重建。
 
-### 快捷键
+<details>
+<summary>完整快捷键</summary>
 
 | 按键 | 操作 |
 | --- | --- |
 | `⌃⌥Space` | 唤起 / 收起搜索 |
 | `↑` `↓` | 选择结果 |
 | `Return` | 打开 |
-| `⌘Return` 或 `⌘R` | 在 Finder 中显示 |
-| `⌘Y`，焦点在结果上时也可按 `Space` | 快速查看（Quick Look） |
-| `⌘C` | 复制选中的文件（文字编辑时复制文字） |
+| `⌘Return` / `⌘R` | 在 Finder 中显示 |
+| `⌘Y`；结果列表获得焦点时也可按 `Space` | 快速查看（Quick Look） |
+| `⌘C` | 复制选中的文件；编辑文字时沿用系统复制行为 |
 | `⌘⇧C` | 复制路径 |
 | `⌘F` | 回到搜索框 |
 | `⌘,` | 索引与设置 |
-| `Esc` 或 `⌘W` | 收起 |
+| `Esc` / `⌘W` | 收起 |
 
-窗口顶部的标签按类型筛选，「筛选」菜单可切换文件名 / 内容范围、索引位置和排序方式。
+顶部标签按类型筛选，「筛选」菜单可切换文件名 / 内容范围、索引位置和排序方式。
 
-1.2.0 增加右侧预览栏、命中摘要高亮和列表／网格切换。选中文件后 `⌘C` 复制文件，`⌘⇧C` 复制路径；文本输入及预览中的文字复制使用系统行为。PDF 显示匹配页并可打开独立阅读窗口；代码显示命中行，默认编辑器为 VS Code、VS Code Insiders 或 Cursor 时可定位到行。视频／音频点击播放，收起或切换时停止。
+</details>
 
-1.2.1 优化预览布局：默认「自动」模式下，仅含应用、文件夹、压缩包等结果的搜索使用紧凑列表；图片、文档、代码和媒体保留内容预览。底部预览菜单可选择「自动／显示／隐藏」，显式选择在后续搜索中保持。整组结果决定分栏，切换选中项或加载失败不会改变窗口尺寸。文件操作和完整路径复制保持可见，文本／代码独立滚动，离线时显示已索引内容；不为预览自动解包、下载或重新提取。
+<details>
+<summary>源码中的后续改进：1.2.1 自适应预览（尚未包含在 1.2.0 下载包中）</summary>
 
-旧 PDF 索引在选中后按需查找文字层，新提取的 PDF 同时保存正文／OCR 页码。旧扫描件没有页码映射时仍可查看原 OCR 内容，重新提取后才具有页码；升级不会自动重建索引。离线磁盘显示已保存内容，原文件预览需要磁盘在线。
+「自动」模式让应用、文件夹、压缩包等结果使用紧凑列表，图片、文档、代码与媒体保留内容预览。底部菜单可选择「自动／显示／隐藏」，显式选择在后续搜索中保持。整组结果决定分栏，切换选中项或加载失败不会改变窗口尺寸。
+
+文件操作与完整路径复制保持可见，文本和代码独立滚动；离线时显示已索引内容，不为预览自动解包、下载或重新提取。
+
+</details>
 
 ## 搜索语法
 
+先输入关键词，需要时再加条件。
+
 | 输入 | 效果 |
 | --- | --- |
-| `数学分析` | 匹配中文文件名、拼音、首字母与正文 |
-| `sxfx` / `shuxue` | 拼音首字母 / 全拼 |
+| `数学分析` | 搜索名称与正文 |
+| `sxfx` / `shuxue` | 用拼音首字母 / 全拼匹配名称 |
 | `数学 期末` | 同时包含多个词 |
 | `"alpha beta"` | 完整短语 |
 | `ext:pdf` | 限定扩展名 |
 | `path:课程` | 限定路径 |
 | `数学 -草稿` | 排除含「草稿」的结果 |
-| `kind:图片 海棠` | 只看图片；也支持 文档、文件夹、视频、音频、代码、压缩包、应用 |
+| `kind:图片 海棠` | 只看图片；也支持文档、文件夹、视频、音频、代码、压缩包、应用 |
 
-每次最多显示 500 个结果，可以用类型、位置或更多关键词缩小范围。
+每次最多显示 500 个结果，可用类型、位置或更多关键词缩小范围。
 
-## 支持的内容
+## 支持范围
 
-| 内容 | 支持范围 |
+| 内容 | 如何搜索 |
 | --- | --- |
-| 图片文字 | Apple Vision 本地 OCR：PNG、JPEG、HEIC、TIFF、BMP、GIF、WebP，动图只处理首帧 |
-| 图片内容 | Vision 分类标签与常用中文别名（鸟、花、海滩、截图、文档……），按标签检索 |
-| PDF | 提取文字层，没有文字的页面执行 OCR，扫描版 PDF 同样可搜 |
-| Word / PowerPoint / Excel | DOCX 正文、页眉与页脚，PPTX 幻灯片与备注，XLSX 单元格；旧版 DOC 由系统转换，PPT、XLS 由系统即时导入 |
-| Pages / Numbers / Keynote | 优先由系统直接解析，失败时从内嵌的 PDF 或预览图提取，这种情况下可能只有部分内容，界面会给出提示 |
-| 其他文档 | TXT、Markdown、CSV、HTML、RTF / RTFD、EPUB，以及常见代码与配置文件 |
-| 外置盘 | 目录、正文与标签保存在本机，断开后仍可检索；打开原文件需要重新接入 |
+| 图片文字 | Vision 本地 OCR：PNG、JPEG、HEIC、TIFF、BMP、GIF、WebP；动图处理首帧 |
+| 图片内容 | Vision 分类标签与常用中文别名，如鸟、花、海滩；不支持任意自然语言描述的语义检索 |
+| PDF | 提取文字层，无文字页面执行 OCR，扫描版也可搜索 |
+| Word / PowerPoint / Excel | DOCX 正文、页眉页脚，PPTX 幻灯片与备注，XLSX 单元格；旧 DOC 经系统转换，PPT、XLS 经系统导入 |
+| Pages / Numbers / Keynote | 优先使用系统解析，失败时读取内嵌 PDF 或预览图；回退提取可能只有部分内容，界面会提示 |
+| 文本与代码 | TXT、Markdown、CSV、HTML、RTF / RTFD、EPUB，以及常见代码与配置文件 |
+| 外置盘 | 已索引的目录、正文与标签离线可搜；打开、预览原文件需要重新接入 |
 
-单个文件的内容提取上限为 64 MiB 输入、8 MiB 文字，ZIP 解包总量不超过 128 MiB；超出上限时记录提示，文件名照常可搜。未下载到本机的云端占位文件只索引名称，不会触发下载；有密码保护的文档不解密。
+<details>
+<summary>提取限制与预览兼容性</summary>
 
-## 性能
+- 单文件上限：64 MiB 输入、8 MiB 提取文字、128 MiB ZIP 解包总量；超限会记录提示，名称仍可搜索。有密码保护的文档不解密。
+- OCR、PDF 与 iWork 解析逐个在独立 helper 进程中运行，单文件超过 180 秒会终止并记录，后续文件继续处理。
+- 旧 PDF 的文字层按需查找页码；旧扫描件保留原 OCR 正文，重新提取后才有页码定位。文件改变、索引尚未更新时，过时位置会停用。
+- 媒体格式取决于 macOS 支持。离线内容预览使用已保存的文本，原文件预览需要磁盘在线。
+- 新版 iWork 格式的全文完整性尚未经过大量真实样本验证。外置盘离线与重连已用 APFS 磁盘镜像测试，实体硬盘物理插拔尚未系统测试。
 
-1.1.0 在 Apple M5（16 GB 内存）上，使用 2,479,232 个真实文件名做基准，每个查询运行 20 轮，统计名称匹配加读取结果的 P95：
+</details>
+
+## 性能与验证
+
+名称搜索优先响应，全文结果分批返回。宽泛的全文查询耗时更长：既有测试中，「数学」「报告」约 1–8 秒，`README`、`OCR` 等极常见词可能超过 10 秒。
+
+下面保留各版本的历史测量与验证记录，**不作为最新版或所有设备的性能承诺**。
+
+<details>
+<summary>展开基准：文件名查询、内存与索引体积</summary>
+
+1.1.0 · Apple M5 / 16 GB · 2,479,232 个真实文件名 · 每查询 20 轮。P95 包含名称匹配与结果读取，不包含全文检索或首次索引。
 
 | 查询 | 类型 | P95 |
 | --- | --- | ---: |
@@ -128,80 +181,61 @@
 | `pdf` | 英文 | 70.1 ms |
 | `README` | 英文 | 77.5 ms |
 
-- **索引缩小 86%**：1.1.0 按 SHA-256 对正文去重、用 LZFSE 无损压缩，全文索引不再重复保存正文。同一份索引从 51.07 GB 降到 7.28 GB，迁移时 840,123 条已提取内容逐条校验，无一缺失。
-- **重启即可用**：名称索引缓存直接映射进内存，354 万个文件约 0.2–0.6 秒恢复，无需重新扫描。
-- **内存占用**：在 354 万个文件的索引上，1.1.5 主进程常驻约 25–50 MB（1.1.4 为 233–373 MB）；OCR 与文档解析在按文件启动的 helper 中进行，不计入此数。
-- **扫描更省 CPU**：1.1.5 减少了扫描时逐项的系统调用，同一目录树的扫描 CPU 时间降到原来的 1/4–1/3，扫描结果逐项一致。
-- **宽泛的全文查询**：按相关度排序时，正文凑满一页（500 条）就停止验证，“数学”“报告”这类常见词约 1–8 秒；`README`、`OCR` 这类极常见的词仍可能超过 10 秒。期间文件名结果和已验证的正文命中会先显示。
+- **索引体积（1.1.0）**：同一份索引从 51.07 GB 降到 7.28 GB；正文按 SHA-256 去重并用 LZFSE 无损压缩，迁移逐条核验了 840,123 条已提取内容。
+- **名称缓存恢复（1.1.5）**：354 万文件的名称索引约 0.2–0.6 秒恢复，无需重新扫描。
+- **主进程常驻（1.1.5）**：354 万文件索引下约 25–50 MB；不含按文件启动的 OCR / 文档 helper。1.1.4 对照为 233–373 MB。
+- **扫描 CPU（1.1.5）**：同一目录树的 CPU 时间降到原来的 1/4–1/3，扫描结果逐项一致。
 
-## 工作原理
+</details>
 
-<p align="center">
-  <img src="docs/assets/architecture.png" width="100%" alt="觅迹工作原理：后台由 FSEvents 驱动增量建立索引，前台名称引擎与正文检索并行返回结果">
-</p>
+[1.2.0 发布验证](docs/releases/1.2.0.md)：Core 186 项通过、1 项可选大型基准跳过，App 19 项通过；实机检查覆盖扫描 PDF 页码与高亮、代码行定位、缩略图网格、DOCX 预览及 H.264/AAC 播放。1.1.5 的 CLI 端到端检查为 52/52 通过。
+
+## 给想看看内部的人
+
+SwiftUI / AppKit 提供原生界面，Apple Vision 识别图片，SQLite 保存目录与全文索引。名称匹配与正文检索并行返回结果，FSEvents 驱动后台增量更新。
+
+<details>
+<summary>架构与模块</summary>
+
+<p><img src="docs/assets/architecture.png" width="100%" alt="索引与搜索流程：文件事件驱动后台提取，名称引擎与正文检索并行返回结果"></p>
+
+图中缓存恢复耗时来自早期测量，具体规模与版本见上方基准。
 
 | 模块 | 职责 |
 | --- | --- |
-| `MijiApp` | SwiftUI / AppKit 浮窗、菜单栏、全局快捷键、设置窗口与 Quick Look |
-| `MijiCore` | 目录扫描、FSEvents 增量更新、SQLite 目录与 FTS5、内容提取调度、索引迁移 |
-| `CContentIndex` | 自定义 FTS5 分词器 `miji_grams`：1–3 字符 gram 只负责召回候选，命中再按原文字面验证 |
-| `OilFindCore` / `COilFind` | 来自 Oil Find v1.6.2 的 MIT 名称核心（SIMD 字节匹配与拼音表），觅迹在此基础上增加了紧凑名称列与二进制快照 |
-| `MijiCLI` | 命令行工具；打包后同时作为单文件提取 helper `miji-extract` |
+| `MijiApp` | 浮窗、菜单栏、全局快捷键、设置、文件预览与 Quick Look |
+| `MijiCore` | 扫描、FSEvents、SQLite / FTS5、内容提取调度与索引迁移 |
+| `CContentIndex` | `miji_grams` 分词器，用 1–3 字符 gram 召回候选，再按原文字面验证 |
+| `OilFindCore` / `COilFind` | Oil Find 的 MIT 名称核心与拼音表；觅迹增加紧凑名称列与二进制快照 |
+| `MijiCLI` | 命令行工具；打包后也用作单文件提取 helper `miji-extract` |
 
-## 隐私
+索引位于 `~/Library/Application Support/Miji/`，目录仅允许当前用户读写。图片识别、文档全文与外置盘处理可分别关闭，已索引内容保留。
 
-<table>
-<tr>
-<td width="56%">
-<ul>
-<li>源码中没有任何网络请求，不上传文件，也不收集统计数据。</li>
-<li>索引保存在 <code>~/Library/Application Support/Miji/</code>，目录权限仅限当前用户读写。</li>
-<li>OCR 使用 macOS 自带的 Vision 框架，在本机运行。</li>
-<li>图片识别、文档全文、外置盘处理都能在设置里单独关闭，已有结果会保留。</li>
-<li>移除一个索引位置只删除对应索引，不会动原文件。</li>
-</ul>
-</td>
-<td><img src="docs/assets/settings.png" width="100%" alt="索引与设置：所有识别和搜索都在这台 Mac 上完成"></td>
-</tr>
-</table>
+</details>
 
-## 从源码构建
+<details>
+<summary>从源码构建</summary>
 
-需要 macOS 14 以上和 Swift 5.9 工具链（Xcode 15 或更新版本）。
+需要 macOS 14+、Swift 5.9 工具链（Xcode 15 或更新版本）。
 
 ```sh
 git clone https://github.com/kbwumin13-sudo/miji.git
 cd miji
-swift test                                                   # Core 与 App 测试
-bash scripts/package.sh                                      # 构建 Release、签名并打包到 output/
+swift test                                               # Core 与 App 测试
+bash scripts/package.sh                                  # Release 构建、签名与打包
 python3 scripts/e2e-check.py --cli .build/release/miji-cli   # 端到端检查
 ```
 
-1.1.5 发布前，181 项 Core 测试（其中 1 项大型基准默认跳过）与 7 项 App 测试全部通过，Release 版命令行端到端检查 52/52 通过，覆盖 OCR、PDF、DOCX、拼音与过滤语法，以及用 APFS 磁盘镜像模拟的外置盘离线与重连。
+打包产物位于 `output/`。源码可能包含尚未发布的改动，日常使用请下载 Releases 中的版本。
 
-```text
-Sources/
-  MijiApp/         浮窗、设置、菜单栏与快捷键
-  MijiCore/        索引服务、扫描、FSEvents、SQLite、内容提取
-  MijiCLI/         命令行工具与提取 helper
-  CContentIndex/   FTS5 n-gram 分词器
-Vendor/OilFind/    Oil Find v1.6.2 名称核心（MIT），本地改动见 UPSTREAM.md
-Tests/             Core 与 App 测试
-scripts/           打包、图标生成、端到端检查
-```
+</details>
 
-## 当前边界
+遇到搜不到的文件、预览问题，或有想要的功能，欢迎[提一个 Issue](https://github.com/kbwumin13-sudo/miji/issues)。附上 macOS 版本、觅迹版本和复现步骤即可；示例文件请先去掉私人信息。
 
-- 只提供 Apple Silicon 版本，需要 macOS 14 或更新。
-- 应用为 ad-hoc 签名，尚未公证，首次打开需要手动放行。
-- 图片内容搜索基于 Vision 分类标签，不支持任意自然语言描述的语义检索。
-- Pages、Numbers、Keynote 新版文件格式的全文完整性还没有用大量真实样本验证。
-- 外置盘离线与重连已用 APFS 磁盘镜像自动化测试，实体硬盘的物理插拔尚未系统测试。
+## 致谢与许可
 
-## 致谢
+名称匹配核心与拼音表来自 [Oil Find](https://github.com/oil-oil/oil-find) v1.6.2（MIT，Copyright © 2026 Lin Zhihuang），固定 commit 与本地改动见 [UPSTREAM.md](Vendor/OilFind/UPSTREAM.md)。浮窗交互参考了 Oil Find 与 macOS 聚焦搜索。
 
-名称匹配核心与拼音表来自 [Oil Find](https://github.com/oil-oil/oil-find) v1.6.2（MIT License，Copyright © 2026 Lin Zhihuang），固定的 commit 与本地改动记录在 [Vendor/OilFind/UPSTREAM.md](Vendor/OilFind/UPSTREAM.md)。搜索浮窗的交互参考了 Oil Find 与 macOS 聚焦搜索。
+觅迹以 [MIT License](LICENSE) 开源；`Vendor/OilFind` 保留[原 MIT 许可证](Vendor/OilFind/LICENSE)，随应用一同分发。
 
-## 许可证
-
-觅迹以 [MIT License](LICENSE) 发布。`Vendor/OilFind` 中的代码沿用其原有的 [MIT License](Vendor/OilFind/LICENSE)，发布包内附带该许可证。
+<p align="center"><b>少翻几个文件夹，多留一点时间给正在做的事。</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/latest">下载觅迹 ↗</a></p>

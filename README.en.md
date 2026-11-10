@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/latest"><img src="https://img.shields.io/github/v/release/kbwumin13-sudo/miji?display_name=tag&color=087e65&label=release" alt="Latest release"></a>
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.0"><img src="https://img.shields.io/badge/release-v1.3.0-087e65" alt="Miji 1.3.0"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-172f2a?logo=apple&logoColor=white" alt="macOS 14 or later">
   <img src="https://img.shields.io/badge/Apple_Silicon-arm64-172f2a" alt="Apple Silicon arm64">
   <img src="https://img.shields.io/badge/processing-on--device-087e65" alt="Recognition, indexing and search run on your Mac">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/latest"><b>Download Miji ↗</b></a> &nbsp; · &nbsp;
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.0"><b>Download Miji ↗</b></a> &nbsp; · &nbsp;
   <a href="#quick-start">Quick start</a> &nbsp; · &nbsp;
   <a href="#search-syntax">Search syntax</a> &nbsp; · &nbsp;
   <a href="README.md">简体中文</a>
@@ -27,42 +27,43 @@
 
 | You remember… | Try typing | Miji looks for… |
 | --- | --- | --- |
-| 数学分析, without switching input methods | `sxfx` / `shuxue` | Chinese file names matched by pinyin initials or full pinyin |
-| A lecture mentioning 拉格朗日 (Lagrange) | `拉格朗日 ext:pdf` | Text inside PDFs, including OCR from scanned pages |
-| A screenshot with 考试安排 (exam schedule) | `考试安排 kind:image` | Words recognized inside images |
+| 海棠灌溉 (garden irrigation), without switching input methods | `htgg` / `haitang` | Chinese file names matched by pinyin initials or full pinyin |
+| A plan mentioning 滴灌 (drip irrigation) | `滴灌 ext:pdf` | Text inside PDFs, including OCR from scanned pages |
+| A screenshot with 花园计划 (garden plan) | `花园计划 kind:image` | Words recognized inside images |
 | A bird photo named IMG-something | `鸟 kind:image` | Photos with locally recognized bird labels |
+
+These examples use fictional materials.
 
 **Unplug the drive. Keep the clues.** Once indexed, an external drive's file catalog, extracted text and image labels stay searchable. Find out where the file lives, then reconnect the right drive to open it.
 
+<!-- MIJI_1_3_SCREENSHOT: replace with final Release captures from mac-13 before publishing.
 <p align="center">
-  <img src="docs/assets/demo-en.gif" width="100%" alt="Miji on a real Mac: searching with pinyin initials, image text, image labels and document text">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-light.png">
+    <img src="docs/assets/miji-1.3.0-light.png" alt="Miji 1.3.0: search results, matching snippets and file previews using fictional materials" width="100%">
+  </picture>
 </p>
-<p align="center"><sub>Recorded with 1.1.0 using fictional course materials; the interface, results and timings are from an actual run. The previews added in 1.2.0 are described below.</sub></p>
+-->
+
+## 1.3.0: find the clue, see the context
+
+- **Older content gets a chance to surface**: content search no longer stops after filling a page solely from recently indexed files. Earlier content also enters candidate exploration; content matches are ranked by relevance and include snippets.
+- **See where the search stands**: the interface shows search progress and whether a search budget limited the results. Changing the query prevents stale results from being acted on as current matches.
+- **Filters you can see and remove**: active conditions are visible and individually removable, so it is clear what is narrowing the results.
+- **Tell same-named files apart**: each result shows “parent folder · disk name.” Offline drives and unavailable original files have distinct messages to help you decide what to do next.
+- **A native look that follows your Mac**: the interface follows the system's light or dark appearance, uses system Liquid Glass on macOS 26 and later, and retains a dark frosted-glass option.
+
+Candidate exploration has time and decompression budgets; it does not guarantee a search of every indexed passage. If the interface reports limited results, add keywords or narrow the file type, path or location.
 
 ## Find it. Take a look. Keep going.
 
-[1.2.0](docs/releases/1.2.0.md) brings file previews into the search window. Select a result to check whether it is the one you need.
+Select a result in the search window to check whether it is the one you need. The preview adapts to the result types, and you can also show or hide it manually.
 
 - **Read the matching passage**: highlighted snippets explain the match; PDFs open at the matching page, with a separate reading window available.
 - **Jump to the matching line**: code previews show line locations and can open them in VS Code, VS Code Insiders or Cursor when set as your default editor.
 - **Browse pictures and play media**: switch between list and thumbnail grid; audio and video play on demand and stop when you switch results or close the preview.
 - **Keep your hands on the keyboard**: `Return` opens, `⌘Return` reveals in Finder, `⌘C` copies the file, and `⌘⇧C` copies its path.
-
-<details>
-<summary>See pinyin, full-text, OCR and image-label search in action</summary>
-
-<p>
-  <img src="docs/assets/feature-pinyin-en.png" width="49%" alt="Pinyin search: sxfx matches 数学分析">
-  <img src="docs/assets/feature-fulltext-en.png" width="49%" alt="Full-text search: find keywords inside documents">
-</p>
-<p>
-  <img src="docs/assets/feature-ocr-en.png" width="49%" alt="Image OCR: compare the original image with recognized text">
-  <img src="docs/assets/feature-labels-en.png" width="49%" alt="Image labels: find photos with no text in them">
-</p>
-
-These feature images use fictional course materials in 1.1.0. They do not show the newer preview layout.
-
-</details>
 
 ## Built for everyday searching
 
@@ -70,7 +71,7 @@ These feature images use fictional course materials in 1.1.0. They do not show t
 | --- | --- |
 | **Less typing in Chinese** | Search with Chinese characters, full pinyin or initials. Exact and prefix matches rank higher. |
 | **Results as you type** | Name matches arrive first, followed by content matches. Changing the query or closing the panel cancels stale work. |
-| **Your files first** | Personal files rank above system, Library and dependency folders; files recently opened through Miji move up. |
+| **Relevant results first** | Exact names, frequently used prefixes and pinyin matches get priority. Content ranks by phrase matches and term proximity, appearing alongside ordinary name matches. |
 | **Pick up where you left off** | Incremental scans follow changed paths. Restarts restore the name cache and replay file events. |
 | **Your files stay on your Mac** | No uploads or telemetry. OCR uses the built-in Apple Vision framework; indexing and search are local. |
 
@@ -80,7 +81,7 @@ Indexing starts at `/`, including accessible system folders, hidden files and Li
 
 **Apple Silicon · macOS 14 or later**
 
-1. [Download the latest release](https://github.com/kbwumin13-sudo/miji/releases/latest), unzip `Miji-1.2.0-macOS-arm64.zip`, and drag 觅迹.app into Applications.
+1. [Download Miji 1.3.0](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.0), unzip `Miji-1.3.0-macOS-arm64.zip`, and drag 觅迹.app into Applications.
 2. **First launch**: Miji is ad-hoc signed and not yet notarized by Apple. If macOS cannot verify the developer, try opening the app once, then choose **Open Anyway** in System Settings → Privacy & Security. If it says the app “is damaged,” confirm the archive came from this repository's Releases, then run:
 
    ```sh
@@ -113,7 +114,7 @@ The top tabs filter by file type. The filter menu controls name / content scope,
 </details>
 
 <details>
-<summary>Coming from source: 1.2.1 adaptive previews (not in the 1.2.0 download)</summary>
+<summary>How adaptive previews work</summary>
 
 Automatic mode keeps application, folder, archive and other metadata-only searches in a compact list, while pictures, documents, code and media keep the content pane. The footer offers Automatic / Show / Hide, and an explicit choice persists across searches. The whole result set determines the layout, so selection changes and loading failures do not resize the window.
 
@@ -127,13 +128,13 @@ Start with a keyword. Add a filter when you need one.
 
 | Query | Effect |
 | --- | --- |
-| `数学分析` | Search names and content |
-| `sxfx` / `shuxue` | Match names by pinyin initials / full pinyin |
-| `数学 期末` | Match all words |
+| `海棠灌溉` | Search names and content |
+| `htgg` / `haitang` | Match names by pinyin initials / full pinyin |
+| `花园 滴灌` | Match all words |
 | `"alpha beta"` | Exact phrase |
 | `ext:pdf` | Filter by extension |
-| `path:课程` | Filter by path |
-| `数学 -草稿` | Exclude results containing 草稿 |
+| `path:演示` | Filter by path |
+| `花园 -草稿` | Exclude results containing 草稿 |
 | `kind:image 海棠` | Images only; also supports `document`, `folder`, `video`, `audio`, `code`, `archive`, `application` and their Chinese names |
 
 Up to 500 results are shown. Narrow them down by type, location or more keywords.
@@ -163,23 +164,33 @@ Up to 500 results are shown. Narrow them down by type, location or more keywords
 
 ## Performance and verification
 
-Name search responds first, with full-text matches arriving in batches. Broad content queries take longer: earlier tests measured about 1–8 seconds for common words such as 数学 or 报告, while very common terms such as `README` or `OCR` could exceed 10 seconds.
+1.3.0 checks candidate coverage, ranking and latency on a fixed fictional dataset: 800 files and 24 tasks, including 6 held out. Relevance labels are provisional development labels, without user-validated real-world task judgments.
 
-The records below are tied to the versions tested. **They are not benchmarks of the latest release or promises for every device.**
+<details>
+<summary>1.3.0 search quality: gains and tradeoffs</summary>
+
+Success@5 means at least one directly relevant document appears in the first five results. Text, paths and modification times stay fixed; only insertion order changes. Both versions use the same labels:
+
+| Insertion order | Previous Success@5 | 1.3.0 Success@5 |
+| --- | ---: | ---: |
+| Forward | 37.5% | 100.0% |
+| Reverse | 37.5% | 100.0% |
+| Fixed-seed shuffle | 45.8% | 100.0% |
+
+- **A retained tradeoff**: one multi-document task's nDCG@10 fell from 1.000 to 0.920 while Success@5 stayed unchanged. This metric gives no repeated gain to copies of the same content, exposing room to improve result diversity.
+- **CLI latency with warm caches**: median / P95 across all tasks changed from 35.65 / 96.33 ms to 39.72 / 114.57 ms. Name-only median latency was 0.26 → 0.26 ms. Core search timings exclude name loading; system caches were not cleared. These are not app-startup or cold-disk measurements.
+- **Coverage remains bounded**: many duplicates, content indexed in the middle of the sequence, very long documents, or relevant passages late in a file may still be missed or rank lower because of budgets and limited text windows. The results apply to this dataset, not full-index recall or real-user task accuracy.
+
+<!-- MIJI_1_3_REPORT: link docs/search-quality-review.md after lead integration and verify final figures. -->
+
+</details>
+
+The historical records below retain their original test conditions. They describe earlier index sizes and resource use, not new measurements of 1.3.0.
 
 <details>
 <summary>Benchmarks: name queries, memory and index size</summary>
 
-1.1.0 · Apple M5 / 16 GB · 2,479,232 real file names · 20 runs per query. P95 includes name matching and result reads, not full-text search or initial indexing.
-
-| Query | Kind | P95 |
-| --- | --- | ---: |
-| `数学分析` | Chinese | 9.7 ms |
-| `数学` | Short Chinese | 19.5 ms |
-| `shuxue` | Full pinyin | 28.9 ms |
-| `sx` | Initials | 49.1 ms |
-| `pdf` | English | 70.1 ms |
-| `README` | English | 77.5 ms |
+1.1.0 · Apple M5 / 16 GB · 2,479,232 file names · 20 runs per query. P95 ranged from 9.7–77.5 ms across six Chinese, pinyin, initials and English queries. This includes name matching and result reads, not full-text search or initial indexing. Only aggregate results are retained here, without the original query strings.
 
 - **Index size (1.1.0)**: the same index shrank from 51.07 GB to 7.28 GB through SHA-256 text deduplication and lossless LZFSE compression; all 840,123 extracted records were verified during migration.
 - **Name cache restore (1.1.5)**: about 0.2–0.6 seconds for 3.54 million files, without a rescan.
@@ -188,8 +199,6 @@ The records below are tied to the versions tested. **They are not benchmarks of 
 
 </details>
 
-[1.2.0 release verification](docs/releases/1.2.0.md): 186 Core tests passed, one optional large benchmark skipped, and 19 App tests passed. Hands-on checks covered scanned-PDF page locations and highlights, code line navigation, thumbnail grids, DOCX previews and H.264/AAC playback. The 1.1.5 CLI end-to-end suite passed 52/52 checks.
-
 ## Under the hood
 
 SwiftUI / AppKit provide the native interface, Apple Vision recognizes images, and SQLite stores the catalog and full-text index. Name and content search return results in parallel; FSEvents drives incremental indexing in the background.
@@ -197,14 +206,10 @@ SwiftUI / AppKit provide the native interface, Apple Vision recognizes images, a
 <details>
 <summary>Architecture and modules</summary>
 
-<p><img src="docs/assets/architecture-en.png" width="100%" alt="Indexing and search: file events drive background extraction; name and content engines return results in parallel"></p>
-
-The cache-restore timing in the diagram is from an earlier measurement. See the benchmark above for dataset size and version.
-
 | Module | Responsibility |
 | --- | --- |
 | `MijiApp` | Search panel, menu bar, hotkey, settings, file previews and Quick Look |
-| `MijiCore` | Scanning, FSEvents, SQLite / FTS5, extraction scheduling and index migration |
+| `MijiCore` | Scanning, FSEvents, SQLite / FTS5, extraction, content-evidence ranking and shared result merging |
 | `CContentIndex` | `miji_grams` tokenizer: 1–3 character grams recall candidates, then verify against the original text |
 | `OilFindCore` / `COilFind` | Oil Find's MIT name core and pinyin tables, extended with compact name columns and binary snapshots |
 | `MijiCLI` | CLI and bundled single-file extraction helper `miji-extract` |
@@ -238,4 +243,4 @@ The name-matching core and pinyin tables come from [Oil Find](https://github.com
 
 Miji is open source under the [MIT License](LICENSE). `Vendor/OilFind` retains its [original MIT license](Vendor/OilFind/LICENSE), included in the app bundle.
 
-<p align="center"><b>Less folder digging. More time for what you opened your Mac to do.</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/latest">Download Miji ↗</a></p>
+<p align="center"><b>Less folder digging. More time for what you opened your Mac to do.</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.0">Download Miji ↗</a></p>

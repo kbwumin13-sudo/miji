@@ -79,15 +79,16 @@ struct MainView:View {
         }
     }
     private func resultActions<V:View>(_ view:V,hit:SearchHit)->some View {
-        view.contentShape(Rectangle())
-            .onTapGesture(count:2){model.selectedID=hit.id;model.openSelected()}
+        let snapshot=model.displayedSnapshot
+        return view.contentShape(Rectangle())
+            .onTapGesture(count:2){model.selectedID=hit.id;model.performFileAction(.open,hit:hit,snapshot:snapshot)}
             .onTapGesture{model.selectedID=hit.id;searchFocused=false}
             .contextMenu {
-                Button("打开"){model.selectedID=hit.id;model.openSelected()}.disabled(!hit.root.isOnline)
-                Button("在 Finder 中显示"){model.selectedID=hit.id;model.revealSelected()}.disabled(!hit.root.isOnline)
-                Button("快速查看"){model.selectedID=hit.id;AppDelegate.shared?.preview()}.disabled(!hit.root.isOnline)
-                Button("复制文件"){model.selectedID=hit.id;model.copySelectedFile()}.disabled(!hit.root.isOnline)
-                Button("复制路径"){model.selectedID=hit.id;model.copySelectedPath()}
+                Button("打开"){model.selectedID=hit.id;model.performFileAction(.open,hit:hit,snapshot:snapshot)}.disabled(!hit.root.isOnline)
+                Button("在 Finder 中显示"){model.selectedID=hit.id;model.performFileAction(.reveal,hit:hit,snapshot:snapshot)}.disabled(!hit.root.isOnline)
+                Button("快速查看"){model.selectedID=hit.id;model.performFileAction(.quickLook,hit:hit,snapshot:snapshot)}.disabled(!hit.root.isOnline)
+                Button("复制文件"){model.selectedID=hit.id;model.performFileAction(.copyFile,hit:hit,snapshot:snapshot)}.disabled(!hit.root.isOnline)
+                Button("复制路径"){model.selectedID=hit.id;model.performFileAction(.copyPath,hit:hit,snapshot:snapshot)}
             }.id(hit.id)
     }
 

@@ -96,7 +96,7 @@ struct ResultPreviewPane: View {
             VStack(spacing: 8) {
                 Group {
                     if hit.file.kind == .image { FileThumbnail(hit: hit, pixels: 800, showsStatus: true) }
-                    else if hit.file.kind == .audio || hit.file.kind == .video { MediaFilePreview(hit: hit).id(hit.path) }
+                    else if hit.file.kind == .audio || hit.file.kind == .video { MediaFilePreview(hit: hit, authorize: { model.fileOperationURL(for:hit,action:.preview) }).id(hit.path) }
                     else { SystemFilePreview(url: url) }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))

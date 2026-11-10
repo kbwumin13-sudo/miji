@@ -141,6 +141,7 @@ private final class PreviewPlayback: ObservableObject {
 
 struct MediaFilePreview: View {
     let hit: SearchHit
+    let authorize: () -> URL?
     @StateObject private var playback = PreviewPlayback()
     var body: some View {
         ZStack {
@@ -150,7 +151,7 @@ struct MediaFilePreview: View {
                 if hit.file.kind == .video { FileThumbnail(hit: hit, pixels: 800, showsStatus: true) }
                 else { Image(systemName: "waveform").font(.system(size: 32)).foregroundStyle(.secondary).offset(y: -48) }
                 Button {
-                    if let url = PreviewResolver.localURL(for: hit) { playback.play(url) }
+                    if let url = authorize() { playback.play(url) }
                 } label: { Image(systemName: "play.circle.fill").font(.system(size: 48)).symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.6)) }
                 .buttonStyle(.plain).accessibilityLabel("播放预览")
                 .disabled(!hit.root.isOnline)

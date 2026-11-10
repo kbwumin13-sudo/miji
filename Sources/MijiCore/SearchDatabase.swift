@@ -348,12 +348,19 @@ public final class SearchDatabase: @unchecked Sendable {
     /// Runs independently after the filename first screen. Includes mixed
     /// filename/body terms; every candidate is verified against exact strings.
     public func searchSupplementary(_ query: String, options: SearchOptions, cancelled: @escaping () -> Bool = { false },
-                                    onPartial:(([SearchHit])->Void)?=nil) throws -> [SearchHit] {
-        try searchImpl(query, options: options, includeNames: false, cancelled: cancelled,onPartial:onPartial)
+                                    onPartial:(([SearchHit])->Void)?=nil, traceCandidates: Bool = false,
+                                    onMetrics: ((SearchMetrics) -> Void)? = nil) throws -> [SearchHit] {
+        try searchImpl(query, options: options, includeNames: false, cancelled: cancelled,onPartial:onPartial,traceCandidates:traceCandidates,onMetrics:onMetrics)
     }
 
     private func searchImpl(_ query: String, options: SearchOptions, includeNames: Bool, cancelled: @escaping () -> Bool,
-                            onPartial:(([SearchHit])->Void)?=nil) throws -> [SearchHit] {
+                            onPartial:(([SearchHit])->Void)?=nil, traceCandidates: Bool = false,
+                            onMetrics: ((SearchMetrics) -> Void)? = nil) throws -> [SearchHit] {
+        let started = DispatchTime.now().uptimeNanoseconds
+        var metrics = SearchMetrics()
+        var decodedBodies = Set<Int64>()
+        func elapsed() -> Double { Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000 }
+        defer { metrics.finalMS = elapsed(); onMetrics?(metrics) }
         if cancelled() { throw CancellationError() }
         return try synchronized {
             if cancelled() { throw CancellationError() }
@@ -364,6 +371,21 @@ public final class SearchDatabase: @unchecked Sendable {
                 return Unmanaged<SearchCancellationContext>.fromOpaque(pointer).takeUnretainedValue().cancelled() ? 1 : 0
             }, context.toOpaque())
             defer { sqlite3_progress_handler(connection, 0, nil, nil); context.release() }
+            let bodyReader = try prepare("SELECT packed FROM content_blobs WHERE id=?")
+            defer { sqlite3_finalize(bodyReader) }
+            func readContent(_ id: Int64) throws -> ExtractedContent? {
+                sqlite3_reset(bodyReader); sqlite3_clear_bindings(bodyReader)
+                try bind([.integer(id)], to: bodyReader)
+                guard try next(bodyReader) else { return nil }
+                let raw = try ContentCodec.unpack(blob(bodyReader, 0))
+                if onMetrics != nil {
+                    decodedBodies.insert(id)
+                    metrics.distinctBodies = decodedBodies.count
+                    metrics.decompressions += 1
+                    metrics.decompressedBytes += raw.count
+                }
+                return try ContentCodec.content(raw, decoder: decoder)
+            }
             let terms = QueryParser.parse(query).terms
             var filters: [String] = []
             var filterValues: [Value] = []
@@ -427,12 +449,14 @@ public final class SearchDatabase: @unchecked Sendable {
                     if cancelled() { throw CancellationError() }
                     let id = sqlite3_column_int64(statement, 0)
                     if seen.contains(id) { return true }
+                    metrics.candidates += 1
+                    if traceCandidates { metrics.candidateOrder.append(text(statement, 1) + "/" + text(statement, 2)) }
                     let name = text(statement, 13), pinyin = text(statement, 14), initials = text(statement, 15)
                     var found: [(body: Bool, labels: Bool)] = []
                     if readBody && !textTerms.isEmpty {
                         let contentID = sqlite3_column_int64(statement, 16)
                         if contentID != contentCacheID {
-                            let content = try contentUnlocked(fileID: id)
+                            let content = try readContent(contentID)
                             let body = Self.bodyHits(content?.text ?? "", textTerms.map(\.value), hanTerms: hanTerms)
                             let labels = QueryParser.normalize(content?.labels.joined(separator: "\n") ?? "")
                             cachedTerms = textTerms.indices.map { (body[$0], labels.contains(textTerms[$0].value)) }
@@ -456,6 +480,7 @@ public final class SearchDatabase: @unchecked Sendable {
                         }
                     }
                     guard matches else { return true }
+                    metrics.verified += 1
                     let file = fileRecord(statement)
                     let root: IndexedRoot
                     if let cached = rootCache[file.rootID] { root = cached }
@@ -463,7 +488,7 @@ public final class SearchDatabase: @unchecked Sendable {
                     let bodyID=readBody && sqlite3_column_type(statement,16) != SQLITE_NULL ? sqlite3_column_int64(statement,16) : nil
                     hits.append((SearchHit(file:file,root:root,snippet:"",matchedIn:readBody ? "内容" : "文件名",labels:""),score,bodyID,name,
                                  tier:Int(sqlite3_column_int(statement,17)),nameHit:nameHit))
-                    if let stopAt, hits.count >= stopAt { return false }
+                    if let stopAt, hits.count >= stopAt { metrics.resultTruncated = true; return false }
                     // A broad body query can match hundreds of thousands of
                     // paths. Keep only a bounded top set, not every snippet.
                     if stopAt == nil, hits.count > max(256,options.limit*2) {
@@ -473,6 +498,7 @@ public final class SearchDatabase: @unchecked Sendable {
                     if let onPartial,Date().timeIntervalSince(lastPartial)>=0.25 {
                         // Every emitted hit has passed all exact predicates.
                         // Continue ranking and add selected snippets at completion.
+                        if metrics.firstResultMS == nil { metrics.firstResultMS = elapsed() }
                         onPartial(hits.sorted(by:stopAt == nil ? better : shown).prefix(options.limit).map(\.0))
                         lastPartial=Date()
                     }
@@ -521,10 +547,9 @@ public final class SearchDatabase: @unchecked Sendable {
             // Name hits keep their rank ahead of a relevance page of bodies.
             if !bodyPaged { hits.sort(by:better) }
             // Read each selected shared body once, then restore result rank.
+            metrics.resultTruncated = metrics.resultTruncated || hits.count > options.limit
             let selected=Array(hits.prefix(options.limit))
             var decorated=[SearchHit?](repeating:nil,count:selected.count)
-            let selectedBodies=try prepare("SELECT packed FROM content_blobs WHERE id=?")
-            defer {sqlite3_finalize(selectedBodies)}
             var previousBody:Int64?,content:ExtractedContent?,bodyTerms:[String]=[],labels="",snippet=""
             for index in selected.indices.sorted(by:{(selected[$0].2 ?? -1)<(selected[$1].2 ?? -1)}) {
                 if cancelled() {throw CancellationError()}
@@ -532,10 +557,8 @@ public final class SearchDatabase: @unchecked Sendable {
                 if candidate.2 != previousBody {
                     content=nil;bodyTerms=[];labels="";snippet=""
                     if let id=candidate.2 {
-                        sqlite3_reset(selectedBodies);sqlite3_clear_bindings(selectedBodies)
-                        try bind([.integer(id)],to:selectedBodies)
-                        if try next(selectedBodies) {
-                            content=try ContentCodec.content(ContentCodec.unpack(blob(selectedBodies,0)),decoder:decoder)
+                        if let loaded = try readContent(id) {
+                            content=loaded
                             // The candidate pass's check, not another scan of the body per term.
                             let found=textTerms.isEmpty ? [] : Self.bodyHits(content?.text ?? "",textTerms.map(\.value),hanTerms:hanTerms)
                             bodyTerms=textTerms.indices.filter {!textTerms[$0].isExcluded && found[$0]}.map {textTerms[$0].value}
@@ -547,6 +570,7 @@ public final class SearchDatabase: @unchecked Sendable {
                 }
                 decorated[index]=Self.hit(file:candidate.0.file,root:candidate.0.root,content:content,terms:terms,scope:options.scope,bodyTerms:bodyTerms,normalizedLabels:labels,cachedSnippet:snippet)
             }
+            if metrics.firstResultMS == nil && !selected.isEmpty { metrics.firstResultMS = elapsed() }
             return decorated.compactMap{$0}
         }
     }

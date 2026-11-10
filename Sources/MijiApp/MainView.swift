@@ -24,7 +24,6 @@ struct MainView: View {
                     if model.previewVisible {
                         Divider()
                         ResultPreviewPane(model: model).frame(width: AppModel.previewWidth)
-                            .background(Color.primary.opacity(0.025))
                     }
                 }
                 Divider()
@@ -149,7 +148,7 @@ struct MainView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     if model.gridEnabled {
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: model.gridColumns), spacing: 10) {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: model.gridColumns), spacing: 12) {
                             ForEach(model.hits) { hit in
                                 resultActions(ResultGridCell(hit: hit, query: model.query, location: model.resultLocation(hit).short, selected: model.selectedID == hit.id), hit: hit)
                             }
@@ -169,8 +168,12 @@ struct MainView: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            Image(systemName: model.searchStatus.phase == .failed ? "exclamationmark.triangle" : "magnifyingglass")
-                .font(.system(size: 30, weight: .light)).foregroundStyle(.tertiary).padding(.bottom, 2).accessibilityHidden(true)
+            if model.searchStatus.phase == .searching || model.searchStatus.phase == .supplementing {
+                ProgressView().controlSize(.regular).padding(.bottom, 4).accessibilityHidden(true)
+            } else {
+                Image(systemName: model.searchStatus.phase == .failed ? "exclamationmark.triangle" : "magnifyingglass")
+                    .font(.system(size: 30, weight: .light)).foregroundStyle(.tertiary).padding(.bottom, 2).accessibilityHidden(true)
+            }
             Text(emptyTitle).font(.system(size: 14, weight: .semibold))
             Text(emptyDetail).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).lineLimit(3)
             if model.searchStatus.phase == .complete && !model.activeFilters.isEmpty {
@@ -445,6 +448,8 @@ private struct CompactResultRow: View {
     }
 }
 
+/// Finder icon-view cell: the thumbnail floats on the panel, selection tints the thumbnail
+/// well and puts the name in an accent capsule; the short location stays under the name.
 private struct ResultGridCell: View {
     let hit: SearchHit
     let query: String
@@ -452,24 +457,37 @@ private struct ResultGridCell: View {
     let selected: Bool
     @State private var hovering = false
     @Environment(\.colorSchemeContrast) private var contrast
+    private var offline: Bool { !hit.root.isOnline }
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(spacing: 7) {
             Group {
-                if hit.root.isOnline && SearchPreviewPolicy.hasContent(hit) { FileThumbnail(hit: hit) }
-                else { Image(nsImage: FileIconCache.icon(hit)).resizable().scaledToFit().frame(width: 42, height: 42).accessibilityHidden(true) }
-            }.frame(maxWidth: .infinity).frame(height: 108)
-                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
-            Text(highlightedFilename(hit.file.name, query: query, selected: selected, size: 12)).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-            HStack(spacing: 4) {
-                if !hit.root.isOnline { Image(systemName: "externaldrive.badge.exclamationmark").foregroundStyle(.orange) }
-                Text(location).lineLimit(1).truncationMode(.middle)
-            }.font(.system(size: 10)).foregroundStyle(.secondary)
-        }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Color.accentColor.opacity(0.16) : Color.primary.opacity(hovering ? 0.06 : 0.025), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selected ? Color.accentColor.opacity(contrast == .increased ? 0.8 : 0.35) : Color.primary.opacity(0.07), lineWidth: 1))
-            .onHover { hovering = $0 }.help(hit.path)
-            .accessibilityElement(children: .combine).accessibilityAddTraits(selected ? .isSelected : [])
-            .accessibilityValue(hit.root.isOnline ? "" : "磁盘未连接")
+                if !offline && SearchPreviewPolicy.hasContent(hit) { FileThumbnail(hit: hit, decorated: true).padding(10) }
+                else {
+                    Image(nsImage: FileIconCache.icon(hit)).resizable().scaledToFit().frame(width: 64, height: 64)
+                        .opacity(offline ? 0.55 : 1).accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity).frame(height: 112)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(selected ? (contrast == .increased ? 0.2 : 0.12) : hovering ? 0.06 : 0)))
+            VStack(spacing: 3) {
+                Text(highlightedFilename(hit.file.name, query: query, selected: selected, size: 12))
+                    .font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(selected ? Color.white : Color.primary)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Capsule().fill(selected ? Color.accentColor : Color.clear))
+                HStack(spacing: 3) {
+                    Image(systemName: offline ? "externaldrive.badge.xmark" : "folder").font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(offline ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.tertiary))
+                    Text(location).lineLimit(1).truncationMode(.middle)
+                    if offline { Text("未连接").fontWeight(.medium).foregroundStyle(.orange).fixedSize() }
+                }.font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.horizontal, 4)
+            }
+        }
+        .padding(.horizontal, 4).padding(.vertical, 6).frame(maxWidth: .infinity)
+        .onHover { hovering = $0 }.help(hit.path)
+        .accessibilityElement(children: .combine).accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(offline ? "磁盘未连接" : "")
     }
 }
 

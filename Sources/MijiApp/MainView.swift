@@ -202,6 +202,8 @@ struct MainView: View {
         return view.contentShape(Rectangle())
             .onTapGesture(count: 2) { model.selectedID = hit.id; model.performFileAction(.open, hit: hit, snapshot: snapshot) }
             .onTapGesture { model.selectedID = hit.id; searchFocused = false }
+            .accessibilityAction { model.selectedID = hit.id; searchFocused = false }
+            .accessibilityAction(named: Text("打开文件")) { model.performFileAction(.open, hit: hit, snapshot: snapshot) }
             .contextMenu {
                 Button("打开") { model.selectedID = hit.id; model.performFileAction(.open, hit: hit, snapshot: snapshot) }.disabled(!hit.root.isOnline)
                 Button("在 Finder 中显示") { model.selectedID = hit.id; model.performFileAction(.reveal, hit: hit, snapshot: snapshot) }.disabled(!hit.root.isOnline)

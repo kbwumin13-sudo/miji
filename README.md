@@ -36,15 +36,14 @@
 
 **硬盘拔了，线索还在。** 已索引的外置盘断开后，文件目录、提取的正文与图片标签仍能搜索。先查清文件在哪，再接上对应的盘打开它。
 
-<!-- MIJI_1_3_SCREENSHOT: replace with final Release captures from mac-13 before publishing.
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-light.png">
-    <img src="docs/assets/miji-1.3.0-light.png" alt="觅迹 1.3.0：虚构资料中的搜索结果、命中摘要与文件预览" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-search-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-search-light.webp">
+    <img src="docs/assets/miji-1.3.0-40a1d67-search-light.webp" alt="觅迹 1.3.0：虚构资料的正文结果、命中摘要、搜索状态与预览高亮" width="800">
   </picture>
 </p>
--->
+<p align="center"><sub>截图来自 1.3.0 / build 14（40a1d67），使用虚构资料；后续版本修复了核心逻辑，外观未变。图中耗时仅代表演示样本。</sub></p>
 
 ## 1.3.0：找到线索，也看清来处
 
@@ -64,6 +63,33 @@
 - **代码直接看命中行**：默认编辑器是 VS Code、VS Code Insiders 或 Cursor 时，可打开到对应行。
 - **图片可以翻，音视频可以播**：列表与缩略图网格随时切换，媒体点击后播放，切换结果或收起预览时停止。
 - **键盘顺手接着用**：`Return` 打开，`⌘Return` 在 Finder 中显示，`⌘C` 复制文件，`⌘⇧C` 复制路径。
+
+<details>
+<summary>看看筛选条件、同名文件与缩略图网格</summary>
+
+**筛选条件就在眼前，同名文件也能分清。** 按类型切换，单项移除条件或重置；「父目录 · 磁盘名」说明文件来自哪里，离线磁盘标为「未连接」。
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-filters-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-filters-light.webp">
+    <img src="docs/assets/miji-1.3.0-40a1d67-filters-light.webp" alt="觅迹 1.3.0：可移除的筛选条件与不同目录、磁盘中的同名文件" width="800">
+  </picture>
+</p>
+
+**换个方式看结果。** 网格展示缩略图、文件名和所在位置，方便浏览图片与文档。
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-grid-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-grid-light.webp">
+    <img src="docs/assets/miji-1.3.0-40a1d67-grid-light.webp" alt="觅迹 1.3.0：缩略图网格、选中文件名称及离线磁盘位置" width="800">
+  </picture>
+</p>
+
+两组截图同样来自 1.3.0 / build 14（40a1d67），使用同一组虚构资料。
+
+</details>
 
 ## 日常用起来，也照顾细节
 
@@ -178,12 +204,15 @@ Success@5 表示前五项中出现至少一份直接满足任务的资料。固�
 | 固定种子随机 | 45.8% | 100.0% |
 
 - **取舍也保留**：一条多资料任务的 nDCG@10 从 1.000 降至 0.920，前五项成功率不变。该指标对相同正文的副本不给重复收益，反映出结果多样性仍有改善空间。
-- **CLI 热缓存耗时**：全部任务的中位数 / P95 从 35.65 / 96.33 ms 变为 39.72 / 114.57 ms；仅名称任务中位数为 0.26 → 0.26 ms。名称加载不计入核心检索耗时，也未清空系统缓存；这些数值不代表应用首启或冷磁盘性能。
+- **复审后的 CLI 热缓存耗时**：全部任务的中位数 / P95 从 35.51 / 96.07 ms 变为 39.94 / 114.63 ms；仅名称任务从 0.249 / 0.294 ms 变为 0.243 / 0.657 ms。旧、新版本同机同库交替 6 轮，统计后 5 轮；名称加载不计入核心检索耗时，系统缓存未清空，这些数值不代表应用首启或冷磁盘性能。
+- **优化 AppModel 评测**：相同 9 条成功任务的首个相关结果 P95 从 94.46 ms 降到 39.52 ms；全部任务前十项稳定且摘要就绪的 P95 从 145.57 ms 增至 158.86 ms。评测使用开启测试接口的优化包、6 轮交替中的后 5 轮，每版 120 次任务；测量应用模型发布结果，不含像素绘制，也不把旧版没有相关结果的任务记为零耗时。
 - **结果仍有边界**：大量副本、中间入库的内容、极长正文，以及相关段落靠后的文件，仍可能因预算或有限正文窗口而遗漏或排后。上述结果只适用于这组固定资料，不能据此宣称全库召回率或真实用户任务准确率。
 
-<!-- MIJI_1_3_REPORT: link docs/search-quality-review.md after lead integration and verify final figures. -->
+完整方法、复现入口与限制见[搜索质量与前端体验评估](docs/search-quality-review.md)。
 
 </details>
+
+**验证状态**：最终全量运行共 231 项，228 通过、2 跳过、1 项既有隔离提取测试失败；该项单独复查及隔离提取整套 11 项均通过，原失败根因仍未确认。修后标准 Release 的端到端检查为 52/52 通过。详情及尚未覆盖的实机组合见[完整报告](docs/search-quality-review.md)。
 
 下面保留历史版本测量条件，供理解早期索引规模与资源占用；它们不是 1.3.0 的重新测量。
 
@@ -221,7 +250,7 @@ SwiftUI / AppKit 提供原生界面，Apple Vision 识别图片，SQLite 保存�
 <details>
 <summary>从源码构建</summary>
 
-需要 macOS 14+、Swift 5.9 工具链（Xcode 15 或更新版本）。
+构建需要 Xcode 26 或更新版本（macOS 26 SDK，用于 Liquid Glass API）。应用运行要求仍为 macOS 14+，较早系统使用兼容材质。
 
 ```sh
 git clone https://github.com/kbwumin13-sudo/miji.git

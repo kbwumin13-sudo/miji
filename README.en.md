@@ -36,15 +36,14 @@ These examples use fictional materials.
 
 **Unplug the drive. Keep the clues.** Once indexed, an external drive's file catalog, extracted text and image labels stay searchable. Find out where the file lives, then reconnect the right drive to open it.
 
-<!-- MIJI_1_3_SCREENSHOT: replace with final Release captures from mac-13 before publishing.
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-light.png">
-    <img src="docs/assets/miji-1.3.0-light.png" alt="Miji 1.3.0: search results, matching snippets and file previews using fictional materials" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-search-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-search-light.webp">
+    <img src="docs/assets/miji-1.3.0-40a1d67-search-light.webp" alt="Miji 1.3.0: content matches, snippets, search status and highlighted previews using fictional files" width="800">
   </picture>
 </p>
--->
+<p align="center"><sub>Captured from 1.3.0 / build 14 (40a1d67) with fictional files. Later core fixes leave the appearance unchanged. On-screen timings apply only to this sample.</sub></p>
 
 ## 1.3.0: find the clue, see the context
 
@@ -64,6 +63,33 @@ Select a result in the search window to check whether it is the one you need. Th
 - **Jump to the matching line**: code previews show line locations and can open them in VS Code, VS Code Insiders or Cursor when set as your default editor.
 - **Browse pictures and play media**: switch between list and thumbnail grid; audio and video play on demand and stop when you switch results or close the preview.
 - **Keep your hands on the keyboard**: `Return` opens, `⌘Return` reveals in Finder, `⌘C` copies the file, and `⌘⇧C` copies its path.
+
+<details>
+<summary>See filters, same-named files and the thumbnail grid</summary>
+
+**Visible filters, clearer locations.** Switch file types, remove individual conditions or reset them. “Parent folder · disk name” tells you where each result lives; disconnected drives are marked offline.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-filters-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-filters-light.webp">
+    <img src="docs/assets/miji-1.3.0-40a1d67-filters-light.webp" alt="Miji 1.3.0: removable filters and same-named files in different folders and drives" width="800">
+  </picture>
+</p>
+
+**Browse results visually.** The grid shows thumbnails, file names and locations for browsing pictures and documents.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-grid-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-grid-light.webp">
+    <img src="docs/assets/miji-1.3.0-40a1d67-grid-light.webp" alt="Miji 1.3.0: thumbnail grid, selected file name and offline drive locations" width="800">
+  </picture>
+</p>
+
+Both pairs also come from 1.3.0 / build 14 (40a1d67), using the same fictional dataset.
+
+</details>
 
 ## Built for everyday searching
 
@@ -178,12 +204,15 @@ Success@5 means at least one directly relevant document appears in the first fiv
 | Fixed-seed shuffle | 45.8% | 100.0% |
 
 - **A retained tradeoff**: one multi-document task's nDCG@10 fell from 1.000 to 0.920 while Success@5 stayed unchanged. This metric gives no repeated gain to copies of the same content, exposing room to improve result diversity.
-- **CLI latency with warm caches**: median / P95 across all tasks changed from 35.65 / 96.33 ms to 39.72 / 114.57 ms. Name-only median latency was 0.26 → 0.26 ms. Core search timings exclude name loading; system caches were not cleared. These are not app-startup or cold-disk measurements.
+- **CLI latency after review fixes, with warm caches**: median / P95 across all tasks changed from 35.51 / 96.07 ms to 39.94 / 114.63 ms. Name-only median / P95 changed from 0.249 / 0.294 ms to 0.243 / 0.657 ms. Old and new versions alternated for 6 rounds on the same machine and dataset; statistics use the last 5. Core timings exclude name loading, and system caches were not cleared. These are not app-startup or cold-disk measurements.
+- **Optimized AppModel evaluation**: across the same 9 successful tasks, P95 time to the first relevant result fell from 94.46 ms to 39.52 ms. Across all tasks, P95 time until the first ten results were stable with snippets ready rose from 145.57 ms to 158.86 ms. This used an optimized, testing-enabled bundle: the last 5 of 6 alternating rounds, 120 task runs per version. It measures model publication, not pixel rendering; old tasks with no relevant result are not recorded as zero latency.
 - **Coverage remains bounded**: many duplicates, content indexed in the middle of the sequence, very long documents, or relevant passages late in a file may still be missed or rank lower because of budgets and limited text windows. The results apply to this dataset, not full-index recall or real-user task accuracy.
 
-<!-- MIJI_1_3_REPORT: link docs/search-quality-review.md after lead integration and verify final figures. -->
+See the [search quality and interface evaluation](docs/search-quality-review.md) for methods, reproduction steps and limitations (in Chinese).
 
 </details>
+
+**Verification status**: the final full test run contained 231 tests: 228 passed, 2 skipped, and 1 existing isolated-extraction test failed. That test passed on its own, as did all 11 tests in the isolated-extraction suite; the original failure's cause remains unconfirmed. The standard Release after the fixes passed 52/52 end-to-end checks. See the [full report](docs/search-quality-review.md) for details and untested hands-on combinations.
 
 The historical records below retain their original test conditions. They describe earlier index sizes and resource use, not new measurements of 1.3.0.
 
@@ -221,7 +250,7 @@ The index lives in `~/Library/Application Support/Miji/`, with directory access 
 <details>
 <summary>Build from source</summary>
 
-Requires macOS 14+ and the Swift 5.9 toolchain (Xcode 15 or later).
+Building requires Xcode 26 or later with the macOS 26 SDK for the Liquid Glass APIs. The app still runs on macOS 14 and later, using a fallback material on earlier systems.
 
 ```sh
 git clone https://github.com/kbwumin13-sudo/miji.git

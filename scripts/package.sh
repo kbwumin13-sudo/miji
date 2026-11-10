@@ -22,5 +22,7 @@ codesign --force --sign - --identifier com.haiyu.miji.extract "$app_path/Content
 codesign --force --sign - --identifier com.haiyu.miji "$app_path"
 codesign --verify --deep --strict "$app_path"
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' resources/Info.plist)"
-ditto -c -k --sequesterRsrc --keepParent "$app_path" "$output_dir/觅迹-$version-macOS-arm64.zip"
+archive_name="Miji-$version-macOS-arm64.zip"
+ditto -c -k --sequesterRsrc --keepParent "$app_path" "$output_dir/$archive_name"
+(cd "$output_dir" && shasum -a 256 "$archive_name" > "$archive_name.sha256")
 printf '%s\n' "$app_path"

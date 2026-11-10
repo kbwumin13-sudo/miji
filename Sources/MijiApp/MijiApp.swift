@@ -33,6 +33,8 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
     private var handler:EventHandlerRef?
     private var monitor:Any?
     private var previewURL:NSURL?
+    private var previewHit:SearchHit?
+    private var previewSnapshot:SearchSnapshot?
     private var subscriptions=Set<AnyCancellable>()
     func applicationDidFinishLaunching(_ notification:Notification) {
         Self.shared=self
@@ -47,6 +49,9 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         Publishers.CombineLatest4(model.$query,model.$hits,model.$previewMode,model.$gridEnabled).sink{[weak self] _ in
             // @Published emits before assignment; size using the completed model state.
             DispatchQueue.main.async {self?.resizeSearchPanel()}
+        }.store(in:&subscriptions)
+        model.$currentSnapshot.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.invalidateQuickLook() }
         }.store(in:&subscriptions)
         model.$showSettings.filter{$0}.sink{[weak self] _ in DispatchQueue.main.async{self?.openSettings();self?.model.showSettings=false}}.store(in:&subscriptions)
         NotificationCenter.default.publisher(for:NSWindow.willCloseNotification).sink{[weak self] notification in
@@ -90,7 +95,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         panel.setFrame(NSRect(x:x,y:y,width:width,height:height),display:true)
     }
     func showPDFMatch() {
-        guard let document=model.previewPDF,let page=model.previewPage else{return}
+        guard let hit=model.selected,model.validateResult(hit,for:.preview),let document=model.previewPDF,let page=model.previewPage else{return}
         let window=NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:700),styleMask:[.titled,.closable,.resizable,.miniaturizable],backing:.buffered,defer:false)
         window.title=model.selected?.file.name ?? "PDF 预览"
         window.isReleasedWhenClosed=false
@@ -145,12 +150,21 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows:Bool)->Bool{showSearch();return true}
     func applicationDidResignActive(_ notification:Notification){if ProcessInfo.processInfo.environment["MIJI_UI_TESTING"] != "1" {hideSearch()}}
     func applicationWillTerminate(_ notification:Notification){model.service?.stop();if let hotKey{UnregisterEventHotKey(hotKey)};if let handler{RemoveEventHandler(handler)};if let monitor{NSEvent.removeMonitor(monitor)}}
-    func preview() {
-        guard let hit=model.selected,let url=PreviewResolver.localURL(for:hit) else{return}
-        previewURL=url as NSURL
+    func preview(hit:SearchHit? = nil,snapshot:SearchSnapshot? = nil) {
+        guard let hit=hit ?? model.selected,let url=model.fileOperationURL(for:hit,action:.quickLook,snapshot:snapshot) else{return}
+        previewURL=url as NSURL;previewHit=hit;previewSnapshot=model.displayedSnapshot
         guard let panel=QLPreviewPanel.shared() else{return}
         panel.dataSource=self;panel.reloadData();panel.level = .floating;panel.makeKeyAndOrderFront(nil)
     }
-    func numberOfPreviewItems(in panel:QLPreviewPanel!)->Int{previewURL == nil ? 0 : 1}
-    func previewPanel(_ panel:QLPreviewPanel!,previewItemAt index:Int)->QLPreviewItem!{previewURL}
+    private var quickLookIsCurrent:Bool {
+        guard let hit=previewHit else{return false}
+        return model.isCurrentResult(hit,snapshot:previewSnapshot) && PreviewResolver.localURL(for:hit) != nil
+    }
+    private func invalidateQuickLook() {
+        guard !quickLookIsCurrent else{return}
+        previewURL=nil;previewHit=nil;previewSnapshot=nil
+        if QLPreviewPanel.sharedPreviewPanelExists() {QLPreviewPanel.shared()?.orderOut(nil)}
+    }
+    func numberOfPreviewItems(in panel:QLPreviewPanel!)->Int{quickLookIsCurrent ? 1 : 0}
+    func previewPanel(_ panel:QLPreviewPanel!,previewItemAt index:Int)->QLPreviewItem!{quickLookIsCurrent ? previewURL : nil}
 }

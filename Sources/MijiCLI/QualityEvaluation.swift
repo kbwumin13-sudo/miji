@@ -70,17 +70,24 @@ enum QualityEvaluation {
                 let start = DispatchTime.now().uptimeNanoseconds
                 func ms() -> Double { Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 }
                 var nameOptions = options; nameOptions.scope = .name
-                let names = try engine.map { engine in
-                    try db.nameHits(ids: engine.search(query, options: nameOptions), query: query,
-                                    verifyContentExclusions: scope == .all)
-                } ?? []
+                var names: [SearchHit] = []
+                if let engine {
+                    var examined = 0
+                    let exclusions = scope == .all && QueryParser.parse(query).terms.contains { $0.field == .text && $0.isExcluded }
+                    repeat {
+                        let ids = try engine.search(query, options: nameOptions)
+                        names += try db.nameHits(ids: Array(ids.dropFirst(examined)), query: query, verifyContentExclusions: exclusions)
+                        if !exclusions || names.count >= options.limit || ids.count < nameOptions.limit { break }
+                        examined = ids.count; nameOptions.limit *= 2
+                    } while true
+                    names = Array(names.prefix(options.limit))
+                }
                 let nameMS = ms()
                 let content = scope == .name ? [] : try db.searchSupplementary(query, options: options, onPartial: { hits in
                     partials.append(["ms": ms(), "paths": hits.prefix(10).map { $0.root.id + "/" + $0.file.relativePath }])
                 }, traceCandidates: args.contains("--trace"), onMetrics: { metrics = $0 })
-                // Replaced by the app's shared merger once its interface lands.
-                var seen = Set(names.map(\.id))
-                let merged = scope == .content ? content : Array((names + content.filter { seen.insert($0.id).inserted }).prefix(options.limit))
+                let merged = SearchResultMerger.merge(nameResults: names, contentResults: content, scope: scope,
+                    sort: options.sort, limit: options.limit, query: query)
                 let value: [String: Any] = ["query": query, "round": round, "name_ms": nameMS, "final_ms": ms(),
                     "metrics": try encoded(metrics), "partials": partials,
                     "hits": merged.map { ["path": $0.root.id + "/" + $0.file.relativePath, "matchedIn": $0.matchedIn, "snippet": $0.snippet] },

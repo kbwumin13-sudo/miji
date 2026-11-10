@@ -52,7 +52,8 @@ for i,(q,scope,ts,task,holdout,filters) in enumerate(extra,9):
     queries.append(dict(id=f'q{i:02}',query=q,intent='按查询与范围找到指定资料',scope=scope,targets=ts,holdout=holdout,task=task,filters=filters))
 for q in queries:
     # Exhaustive explicit labels: no unseen result silently treated as irrelevant.
-    q['labels']={d['root']+'/'+d['path']: (3 if d['root']+'/'+d['path'] in q['targets'] or d['family'] in q['targets'] else 1 if d['path'].startswith('日志/') else 0) for d in docs}
+    weak_logs = q['id'] in {f'q{i:02}' for i in list(range(1,11))+[12,15,16,17,19]}
+    q['labels']={d['root']+'/'+d['path']: (3 if d['root']+'/'+d['path'] in q['targets'] or d['family'] in q['targets'] else 1 if weak_logs and d['path'].startswith('日志/') else 0) for d in docs}
     if q['query'].startswith('潮汐'):
         for t in [targets[0],support,version]:q['labels'][t]=3 if t==targets[0] else 2
         q['labels'][copy]=3

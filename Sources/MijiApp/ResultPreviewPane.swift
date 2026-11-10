@@ -8,8 +8,10 @@ struct ResultPreviewPane: View {
     var body: some View {
         Group {
             if let hit = model.selected {
+                let availability = model.resultAvailability(hit)
+                let snapshot = model.displayedSnapshot
                 VStack(alignment: .leading, spacing: 12) {
-                    header(hit)
+                    header(hit, availability: availability)
                     Divider()
                     HStack {
                         Label("匹配：\(hit.matchedIn)", systemImage: "magnifyingglass")
@@ -19,7 +21,7 @@ struct ResultPreviewPane: View {
                                 .disabled(model.previewPDF == nil).buttonStyle(.plain).help("打开匹配页")
                         } else if let line = model.previewLine { Text("第 \(line) 行") }
                     }.font(.system(size: 10)).foregroundStyle(.secondary)
-                    notices(hit)
+                    notices(availability)
                     content(hit).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     Divider()
                     HStack(alignment: .top, spacing: 8) {
@@ -27,8 +29,8 @@ struct ResultPreviewPane: View {
                         Text(hit.path).font(.system(size: 11)).foregroundStyle(.secondary)
                             .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(hit.path)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Button { model.copySelectedPath() } label: { Image(systemName: "doc.on.doc") }
-                            .buttonStyle(.plain).help("复制完整路径").accessibilityLabel("复制完整路径")
+                        Button { model.performFileAction(.copyPath, hit: hit, snapshot: snapshot) } label: { Image(systemName: "doc.on.doc") }
+                            .buttonStyle(SearchIconButtonStyle()).help("复制完整路径").accessibilityLabel("复制完整路径")
                     }
                 }.padding(16)
             } else {
@@ -39,39 +41,51 @@ struct ResultPreviewPane: View {
         .onChange(of: model.selectedID) { indexedExpanded = false }
     }
 
-    private func header(_ hit: SearchHit) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private func header(_ hit: SearchHit, availability: ResultAvailability) -> some View {
+        let snapshot = model.displayedSnapshot
+        let originalUnavailable = availability.state == .diskOffline || availability.state == .fileUnavailable
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Image(nsImage: FileIconCache.icon(hit)).resizable().scaledToFit().frame(width: 28, height: 28)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(hit.file.name).font(.system(size: 14, weight: .semibold)).lineLimit(2).textSelection(.enabled)
+                    Text(hit.file.name).font(.system(size: 15, weight: .semibold)).lineLimit(2).textSelection(.enabled)
                     Text("\(hit.file.kind.title) · \(hit.file.kind == .folder ? "文件夹" : ByteCountFormatter.string(fromByteCount: hit.file.size, countStyle: .file)) · \(Date(timeIntervalSince1970: hit.file.modified).formatted(.dateTime.year().month().day()))")
                         .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
             HStack(spacing: 8) {
-                Button("打开") { model.openSelected() }.disabled(!hit.root.isOnline)
-                Button("定位") { model.revealSelected() }.disabled(!hit.root.isOnline).help("在 Finder 中显示")
-                Button("复制文件") { model.copySelectedFile() }
-                    .disabled(!hit.root.isOnline || (SearchPreviewPolicy.hasContent(hit) && !model.previewLoading && model.previewLocalURL == nil))
+                Button { model.performFileAction(.open, hit: hit, snapshot: snapshot) } label: { Label("打开", systemImage: "arrow.up.forward.app") }
+                    .buttonStyle(.borderedProminent)
+                Button { model.performFileAction(.reveal, hit: hit, snapshot: snapshot) } label: { Label("定位", systemImage: "folder") }
+                    .help("在 Finder 中显示")
+                Button { model.performFileAction(.copyFile, hit: hit, snapshot: snapshot) } label: { Label("复制", systemImage: "doc.on.doc") }
+                    .help("复制文件").accessibilityLabel("复制文件")
                 Spacer(minLength: 0)
-                Button { AppDelegate.shared?.preview() } label: { Image(systemName: "eye") }
-                    .disabled(!hit.root.isOnline).help("快速查看 · ⌘Y").accessibilityLabel("快速查看")
-            }.controlSize(.small)
+                Button { model.performFileAction(.quickLook, hit: hit, snapshot: snapshot) } label: { Image(systemName: "eye") }
+                    .help("快速查看 · ⌘Y").accessibilityLabel("快速查看")
+            }.controlSize(.small).disabled(originalUnavailable || !model.isCurrentResult(hit))
+                .help(availability.message ?? "打开或定位原文件，也可复制文件")
         }
     }
 
-    @ViewBuilder private func notices(_ hit: SearchHit) -> some View {
-        if !hit.root.isOnline {
-            Label("磁盘未连接 · 显示已索引内容", systemImage: "externaldrive.badge.exclamationmark")
-                .font(.caption).foregroundStyle(.orange)
-        } else if SearchPreviewPolicy.hasContent(hit) && !model.previewLoading && model.previewLocalURL == nil {
-            Text("文件未下载或无法读取 · 显示已索引内容").font(.caption).foregroundStyle(.secondary)
-        }
-        if let warning = model.previewWarning ?? hit.file.contentError {
-            ScrollView { Text(warning).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
-                .frame(maxHeight: 44)
+    @ViewBuilder private func notices(_ availability: ResultAvailability) -> some View {
+        if availability.message != nil || availability.contentMessage != nil {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: availability.state == .diskOffline ? "externaldrive.badge.exclamationmark" : "exclamationmark.circle")
+                    .foregroundStyle(.orange).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    if let message = availability.message { Text(message).font(.system(size: 11, weight: .medium)).fixedSize(horizontal: false, vertical: true) }
+                    if availability.state == .fileUnavailable && !model.previewText.isEmpty {
+                        Text("仍可阅读已索引内容，或复制原路径。").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    if let warning = availability.contentMessage {
+                        ScrollView { Text(warning).font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
+                            .frame(maxHeight: 40)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(10).background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityElement(children: .combine)
         }
     }
 
@@ -99,7 +113,7 @@ struct ResultPreviewPane: View {
                     else if hit.file.kind == .audio || hit.file.kind == .video { MediaFilePreview(hit: hit, authorize: { model.fileOperationURL(for:hit,action:.preview) }).id(hit.path) }
                     else { SystemFilePreview(url: url) }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                 indexedDisclosure(hit)
             }
         } else if !model.previewText.isEmpty {
@@ -119,8 +133,9 @@ struct ResultPreviewPane: View {
             ScrollView(hit.file.kind == .code ? [.horizontal, .vertical] : .vertical) {
                 Text(highlightedPreview(model.previewText, query: model.query))
                     .font(hit.file.kind == .code ? .system(size: 12, design: .monospaced) : .system(size: 13))
-                    .lineSpacing(4).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(12)
-            }.background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                    .lineSpacing(5).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(14)
+            }.background(Color(nsColor: .textBackgroundColor).opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5))
         }
     }
 

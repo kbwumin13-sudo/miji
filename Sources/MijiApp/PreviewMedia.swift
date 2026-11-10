@@ -55,7 +55,7 @@ struct FileThumbnail: View {
             if let image { Image(nsImage: image).resizable().scaledToFit() }
             else if showsStatus {
                 if loading { ProgressView("正在载入缩略图…").controlSize(.small).font(.caption) }
-                else { Label("缩略图不可用 · 可使用快速查看", systemImage: "photo").font(.caption).foregroundStyle(.secondary) }
+                else { VStack(spacing: 8) { Image(systemName: "photo").font(.system(size: 26, weight: .light)); Text("缩略图不可用"); Text("可使用快速查看").font(.caption2) }.font(.caption).foregroundStyle(.secondary) }
             } else { Image(systemName: hit.file.kind.symbol).font(.system(size: 38, weight: .light)).foregroundStyle(.secondary) }
         }
         .task(id: "\(hit.path)|\(hit.file.modified)|\(hit.file.size)|\(pixels)") {

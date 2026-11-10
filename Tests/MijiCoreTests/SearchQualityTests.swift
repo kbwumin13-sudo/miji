@@ -78,6 +78,18 @@ final class SearchQualityTests: XCTestCase {
         XCTAssertTrue(hits.allSatisfy { $0.snippet.contains("alpha beta") })
     }
 
+    func testInternalTopSetTrimStillReportsResultTruncation() throws {
+        let docs = (0..<1_001).map { ("copies/\($0).txt", "needle", 1.0) }
+        let db = try database("trim", documents: docs)
+        try db.run("UPDATE files SET content_id=(SELECT content_id FROM files ORDER BY id LIMIT 1)")
+        var metrics = SearchMetrics()
+        let hits = try db.searchSupplementary("needle", options: SearchOptions(scope: .content, limit: 500), onMetrics: { metrics = $0 })
+        XCTAssertEqual(hits.count, 500)
+        XCTAssertEqual(metrics.verified, 1_001)
+        XCTAssertTrue(metrics.resultTruncated)
+        XCTAssertFalse(metrics.budgetExhausted)
+    }
+
     func testBoundedFalsePositivesReportLimitedInsteadOfExhaustiveEmpty() throws {
         let docs = (0..<4_110).map { ("false/\($0).txt", "abcXbcd \($0)", 1.0) }
         let db = try database("bounded", documents: docs)

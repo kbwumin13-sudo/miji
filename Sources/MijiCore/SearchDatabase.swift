@@ -554,6 +554,7 @@ public final class SearchDatabase: @unchecked Sendable {
                     // A broad body query can match hundreds of thousands of
                     // paths. Keep only a bounded top set, not every snippet.
                     if hits.count > max(256,options.limit*2) {
+                        metrics.resultTruncated = true
                         hits.sort(by:better)
                         hits.removeLast(hits.count-options.limit)
                     }

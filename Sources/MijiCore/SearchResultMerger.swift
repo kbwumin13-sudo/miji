@@ -27,9 +27,10 @@ public enum SearchResultMerger {
             }
             let strong = names.filter(strongName)
             let strongIDs = Set(strong.map(\.id))
-            let ordinary = names.filter { !strongIDs.contains($0.id) }
             let nameIDs = Set(names.map(\.id))
-            let useful = extra.filter { !nameIDs.contains($0.id) && $0.contentRelevance >= 2 }
+            let useful = extra.filter { !strongIDs.contains($0.id) && $0.contentRelevance >= 2 }
+            let usefulIDs = Set(useful.map(\.id))
+            let ordinary = names.filter { !strongIDs.contains($0.id) && !usefulIDs.contains($0.id) }
             let mentions = extra.filter { !nameIDs.contains($0.id) && $0.contentRelevance < 2 }
             merged = strong.map { decorated[$0.id] ?? $0 }
             // Preserve each source's ranking without adding incomparable raw scores.

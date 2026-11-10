@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CSQLite
 @testable import MijiCore
 
 final class SearchQualityTests: XCTestCase {
@@ -123,5 +124,65 @@ final class SearchQualityTests: XCTestCase {
             sort: .relevance, limit: 5).map(\.id), [1])
         XCTAssertEqual(SearchResultMerger.merge(nameResults: [exact], contentResults: [body], scope: .content,
             sort: .relevance, limit: 5).map(\.id), [99])
+    }
+
+    func testStrongBodyOverlapIsPromotedBeforeLimitWithoutDuplicatingStrongNames() {
+        let root=IndexedRoot(id:"r",path:directory.path)
+        func hit(_ id:Int64,_ name:String,_ strength:Int=0)->SearchHit {
+            var hit=SearchHit(file:FileRecord(id:id,rootID:"r",relativePath:name,name:name,fileExtension:"txt",kind:.document,size:0,modified:0),root:root)
+            hit.contentRelevance=strength;return hit
+        }
+        let weak=hit(1,"A-tidal-cache-log.txt"),target=hit(2,"Z-tidal-cache-notes.txt",3),body=hit(3,"opaque.txt",2)
+        let merge={ (names:[SearchHit],limit:Int) in SearchResultMerger.merge(nameResults:names,contentResults:[target,body],scope:.all,sort:.relevance,limit:limit,query:"tidal cache") }
+        XCTAssertEqual(merge([weak,target],2).map(\.id),[2,1],"正文第一的目标不能因普通名称重叠被截掉")
+        XCTAssertEqual(merge([weak,target],5).map(\.id),[2,1,3])
+        let exact=hit(4,"tidal cache.txt",3)
+        let merged=SearchResultMerger.merge(nameResults:[exact,weak,target],contentResults:[target,exact,body],scope:.all,sort:.relevance,limit:5,query:"tidal cache")
+        XCTAssertEqual(merged.map(\.id),[4,2,1,3])
+        XCTAssertEqual(Set(merged.map(\.id)).count,merged.count)
+    }
+
+    /// Force the fourth blob read (the first cache-missing summary) to cross
+    /// the real deadline inside sqlite3_step, rather than before readContent.
+    private final class SummaryInterrupt {
+        let connection:OpaquePointer
+        let external:Bool
+        var reads=0,triggered=false,cancelled=false
+        init(_ connection:OpaquePointer,external:Bool){self.connection=connection;self.external=external}
+    }
+    private func summaryInterruption(external:Bool) throws -> (SearchDatabase,SummaryInterrupt) {
+        let text=String(repeating:"x",count:8*1024*1024-100)
+        let db=try database(external ? "summary-cancel" : "summary-deadline",documents:(0..<3).map { ("\($0).txt","\($0)"+text+" needle",Double(3-$0)) })
+        let probe=SummaryInterrupt(try XCTUnwrap(db.connection),external:external)
+        sqlite3_trace_v2(db.connection,UInt32(SQLITE_TRACE_STMT),{_,context,statement,_ in
+            guard let context,let statement,let sql=sqlite3_sql(OpaquePointer(statement)),String(cString:sql)=="SELECT packed FROM content_blobs WHERE id=?" else{return 0}
+            let p=Unmanaged<SummaryInterrupt>.fromOpaque(context).takeUnretainedValue();p.reads += 1
+            if p.reads==4 {
+                p.triggered=true
+                if p.external {p.cancelled=true}else{Thread.sleep(forTimeInterval:2.05)}
+                sqlite3_interrupt(p.connection)
+            }
+            return 0
+        },Unmanaged.passUnretained(probe).toOpaque())
+        return (db,probe)
+    }
+    func testSummarySQLDeadlineReturnsVerifiedPartialResultsAsLimitedCompletion() throws {
+        let (db,probe)=try summaryInterruption(external:false)
+        defer{sqlite3_trace_v2(db.connection,0,nil,nil)}
+        var metrics=SearchMetrics(),callbacks=0,partials:[[SearchHit]]=[]
+        let hits=try db.searchSupplementary("needle",options:SearchOptions(scope:.content,limit:3),onPartial:{partials.append($0)},onMetrics:{metrics=$0;callbacks += 1})
+        XCTAssertTrue(probe.triggered);XCTAssertFalse(partials.isEmpty)
+        XCTAssertEqual(hits.count,3);XCTAssertTrue(partials.flatMap{$0}.allSatisfy {hit in hits.contains {$0.id==hit.id}})
+        XCTAssertTrue(metrics.budgetExhausted);XCTAssertTrue(metrics.resultTruncated);XCTAssertEqual(callbacks,1)
+        XCTAssertEqual(try db.search("",options:SearchOptions(scope:.name)).count,3,"预算结束后连接仍可查询")
+    }
+    func testSummarySQLInterruptionStillThrowsForExternalCancellation() throws {
+        let (db,probe)=try summaryInterruption(external:true)
+        defer{sqlite3_trace_v2(db.connection,0,nil,nil)}
+        var callbacks=0,partial=false
+        XCTAssertThrowsError(try db.searchSupplementary("needle",options:SearchOptions(scope:.content,limit:3),cancelled:{probe.cancelled},onPartial:{_ in partial=true},onMetrics:{_ in callbacks += 1})) {
+            XCTAssertTrue($0 is CancellationError)
+        }
+        XCTAssertTrue(probe.triggered);XCTAssertTrue(partial);XCTAssertEqual(callbacks,1)
     }
 }

@@ -386,7 +386,11 @@ public final class SearchDatabase: @unchecked Sendable {
             }, context.toOpaque())
             defer { sqlite3_progress_handler(connection, 0, nil, nil); context.release() }
             try execute("BEGIN")
-            defer { try? execute("ROLLBACK") }
+            defer {
+                // Cleanup must run even after the caller or deadline interrupted SQL.
+                sqlite3_progress_handler(connection, 0, nil, nil)
+                try? execute("ROLLBACK")
+            }
             let bodyReader = try prepare("SELECT packed FROM content_blobs WHERE id=?")
             defer { sqlite3_finalize(bodyReader) }
             let metadataStart = metadataCandidates
@@ -676,6 +680,11 @@ public final class SearchDatabase: @unchecked Sendable {
                         let loaded: ExtractedContent?
                         do { loaded = try readContent(id) }
                         catch is ContentBudgetReached { loaded = nil; metrics.budgetExhausted = true; metrics.resultTruncated = true }
+                        catch is CancellationError {
+                            if cancelled() { throw CancellationError() }
+                            guard expired() else { throw CancellationError() }
+                            loaded = nil; metrics.budgetExhausted = true; metrics.resultTruncated = true
+                        }
                         if let loaded {
                             content=loaded
                             // The candidate pass's check, not another scan of the body per term.

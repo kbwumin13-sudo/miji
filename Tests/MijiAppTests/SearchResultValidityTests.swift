@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-import MijiCore
+@testable import MijiCore
 @testable import MijiApp
 
 final class SearchResultValidityTests: XCTestCase {
@@ -99,6 +99,22 @@ final class SearchResultValidityTests: XCTestCase {
         try await waitUntil {!model.searching}
         XCTAssertEqual(model.searchPhase,.complete);XCTAssertEqual(model.searchStatus.count,0)
         XCTAssertEqual(model.searchStatus.timing,.complete)
+    }
+    @MainActor func testBudgetLimitedBodySearchFinishesWithVerifiedResultsAndTiming() async throws {
+        let db=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+        let root=IndexedRoot(id:"desk",path:directory.path,name:"工作盘");try db.saveRoot(root)
+        let records=(0..<4_110).map { FileRecord(rootID:root.id,relativePath:"\($0).txt",name:"\($0).txt",fileExtension:"txt",kind:.document,size:6,modified:1) }
+        try db.upsertFiles(records,generation:1)
+        let first=try XCTUnwrap(db.pendingFiles(rootID:root.id,limit:1).first)
+        XCTAssertTrue(try db.completeContent(file:first,content:ExtractedContent(text:"needle")))
+        try db.run("UPDATE files SET content_id=(SELECT content_id FROM files WHERE content_id IS NOT NULL LIMIT 1)")
+        let model=AppModel();model.service?.stop();defer{model.service?.stop()}
+        model.previewMode = .hidden;model.scope = .content;model.setSearchVisible(true);model.query="needle"
+        try await waitUntil {model.searchPhase == .complete}
+        XCTAssertFalse(model.searching);XCTAssertNil(model.searchError)
+        XCTAssertTrue(model.searchStatus.isLimited);XCTAssertEqual(model.searchStatus.timing,.complete)
+        XCTAssertNotNil(model.completedMilliseconds);XCTAssertEqual(model.hits.count,500)
+        XCTAssertTrue(model.hits.allSatisfy {$0.snippet.contains("needle")})
     }
     @MainActor func testOfflineAndOnlineMissingFilesHaveDifferentMessagesAndPathRemainsCopyable() async throws {
         let records=try populate()

@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -24,7 +25,7 @@ import zipfile
 from xml.sax.saxutils import escape
 
 PROJECT = Path(__file__).resolve().parents[1]
-QA = PROJECT / "output" / "qa"
+QA = Path(os.environ.get("MIJI_QA_DIR", str(PROJECT / "output" / "qa"))).resolve()
 FIXTURES = QA / "fixtures"
 
 
@@ -212,7 +213,7 @@ class Acceptance:
         self.context["localStatistics"] = stats
         self.check("独立 CLI 进程保留 root 与统计", any(r["id"] == indexed["rootID"] for r in roots) and stats["errors"] == 0 and stats["pending"] == 0 and stats["indexedContent"] >= len(expected["documents"]) + 2, stats)
         all_hits = self.search("", label="no-self-index")
-        self.check("日志与 datastore 未被索引", all(Path(hit["path"]).is_relative_to(FIXTURES) for hit in all_hits), {"files": len(all_hits), "datastore": str(self.datastore)})
+        self.check("日志与 datastore 未被索引", all(Path(hit["path"]).resolve().is_relative_to(FIXTURES.resolve()) for hit in all_hits), {"files": len(all_hits), "datastore": str(self.datastore)})
         for extension in ["pages", "numbers", "key"]:
             name = next(name for name in expected["documents"] if name.endswith('.' + extension))
             preview = json.loads(self.run([self.cli, "extract", "--file", FIXTURES / name], f"iwork-warning-{extension}"))

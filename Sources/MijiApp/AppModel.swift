@@ -270,8 +270,12 @@ final class AppModel: ObservableObject {
         let text=query; let options=SearchOptions(kind:kind,rootID:rootID,scope:scope,sort:sort,onlineOnly:!preferences.retainOffline,limit:500)
         let typedAt=Date(); searchStartedAt=typedAt
         let item=DispatchWorkItem { [weak self] in
-            guard let self, !ticket.isCancelled, let database=self.searchDatabase else { return }
-            self.searchWork=nil; self.searching=true
+            guard let self, !ticket.isCancelled else { return }
+            self.searchWork=nil
+            guard let database=self.searchDatabase else {
+                self.searchFailed(NSError(domain:"Miji.Search",code:1,userInfo:[NSLocalizedDescriptionKey:"索引数据库无法打开"]),token:token,ticket:ticket); return
+            }
+            self.searching=true
             let execute=self.searchExecutor, engine=self.nameEngine
             self.searchQueue.async { [weak self] in
                 guard !ticket.isCancelled else { return }
@@ -298,7 +302,7 @@ final class AppModel: ObservableObject {
                     let names=first
                     DispatchQueue.main.async {
                         guard let self,self.searchToken==token,!ticket.isCancelled else { return }
-                        let finished=options.scope == .name || (options.scope == .all && options.sort == .relevance && names.count>=options.limit)
+                        let finished=options.scope == .name
                         self.publish(names,token:token,ticket:ticket,elapsed:options.scope == .name || !names.isEmpty ? Date().timeIntervalSince(typedAt)*1000 : nil,finished:finished)
                         guard !finished,let contentDatabase=self.contentDatabase else { return }
                         let supplement=self.supplementaryExecutor
@@ -333,13 +337,15 @@ final class AppModel: ObservableObject {
     }
     private func publish(_ result:[SearchHit],token:UUID,ticket:SearchTicket,elapsed:Double?,finished:Bool) {
         guard searchToken==token,!ticket.isCancelled else { return }
+        let previous=selected
         hits=result; displayedSnapshot=currentSnapshot; searching = !finished
-        searchPhase = finished ? .complete : .supplementing
+        searchPhase = finished ? .complete : (result.isEmpty ? .searching : .supplementing)
         if firstBatchMilliseconds == nil && !result.isEmpty { firstBatchMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
         if finished { completedMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
         if let elapsed { searchMilliseconds=elapsed }
-        if !result.contains(where:{$0.id==selectedID}) { selectedID=result.first?.id }
-        else { loadPreview() }
+        let preserved=previous.flatMap { old in result.first { $0.file.rootID == old.file.rootID && $0.file.relativePath == old.file.relativePath } }
+        if let preserved { if selectedID != preserved.id { selectedID=preserved.id } else { loadPreview() } }
+        else { selectedID=result.first?.id }
         if finished && searchNeedsRefresh { scheduleSearch() }
     }
     private func searchFailed(_ error:Error,token:UUID,ticket:SearchTicket) {

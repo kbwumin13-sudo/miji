@@ -155,6 +155,10 @@ final class AppModel: ObservableObject {
             contentDatabase=content; previewDatabase=preview; nameEngine=engine
             let worker=Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("miji-extract")
             service=IndexService(database:writer,ignoredPaths:[support.path],extractionWorker:worker)
+            // Freeze authored QA data before refresh/configuration can wake work.
+            if AppDelegate.isBackgroundUITesting && env["MIJI_UI_PAUSE_INDEX"] == "1" {
+                paused=true;service?.setPaused(true)
+            }
         } catch { database=nil; searchDatabase=nil; statusDatabase=nil; contentDatabase=nil; previewDatabase=nil; nameEngine=nil; service=nil; message="索引数据库无法打开：\(error.localizedDescription)" }
         if let data=UserDefaults.standard.data(forKey:"indexingPreferences"), let saved=try? JSONDecoder().decode(IndexingPreferences.self,from:data) { preferences=saved }
         if env["MIJI_NO_AUTOSTART"] == "1" { preferences.autoAddExternal=false }

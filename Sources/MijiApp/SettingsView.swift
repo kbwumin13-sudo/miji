@@ -9,26 +9,35 @@ struct SettingsView:View {
     var body:some View {
         VStack(spacing:0) {
             HStack(spacing:14) {
-                Image(systemName:"magnifyingglass").font(.system(size:28,weight:.light)).foregroundStyle(.secondary).accessibilityHidden(true)
-                VStack(alignment:.leading,spacing:5) {
-                    Text("索引与设置").font(.system(size:22,weight:.semibold))
+                Image(nsImage:NSApp.applicationIconImage).resizable().scaledToFit().frame(width:52,height:52).accessibilityHidden(true)
+                VStack(alignment:.leading,spacing:4) {
+                    Text("索引与设置").font(.system(size:20,weight:.semibold))
                     Label("所有识别和搜索都在这台 Mac 上完成",systemImage:"lock.shield").foregroundStyle(.secondary).font(.system(size:12))
                 }
                 Spacer()
                 Button("完成") {AppDelegate.shared?.closeSettings()}.keyboardShortcut(.defaultAction).controlSize(.large)
-            }.padding(.horizontal,24).padding(.vertical,20)
+            }.padding(.horizontal,24).padding(.vertical,16)
             Divider()
             Form {
                 Section("索引位置") {
                     ForEach(model.roots) {root in
-                        HStack(alignment:.top) {
-                            Image(systemName:root.isExternal ? "externaldrive" : "folder").font(.system(size:22,weight:.regular)).foregroundStyle(.secondary).frame(width:30).padding(.top,4).accessibilityHidden(true)
-                            VStack(alignment:.leading,spacing:5) {
-                                Text(root.name).font(.system(size:13,weight:.semibold))
-                                Text(root.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                                if !root.isOnline {Text("未连接，已保留目录与提取内容").font(.caption).foregroundStyle(.orange)}
-                                if let error=root.lastError {Text(error).font(.caption).foregroundStyle(.orange).lineLimit(3)}
+                        HStack(alignment:.center,spacing:12) {
+                            SettingsIconTile(symbol:root.path == "/" ? "internaldrive.fill" : root.isExternal ? "externaldrive.fill" : "folder.fill",
+                                             color:root.path == "/" || root.isExternal ? Color(nsColor:.systemGray) : .blue)
+                                .opacity(root.isOnline ? 1 : 0.5).accessibilityHidden(true)
+                            VStack(alignment:.leading,spacing:3) {
+                                HStack(spacing:6) {
+                                    Text(root.name).font(.system(size:13,weight:.semibold))
+                                    if !root.isOnline {
+                                        Text("未连接").font(.system(size:10.5,weight:.semibold)).foregroundStyle(.orange)
+                                            .padding(.horizontal,6).padding(.vertical,1).background(Capsule().fill(Color.orange.opacity(0.15)))
+                                    }
+                                }
+                                Text(root.path).font(.system(size:11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(root.path)
+                                if !root.isOnline {Text("已保留目录与提取内容，断开时仍可搜索").font(.system(size:11)).foregroundStyle(.secondary)}
+                                if let error=root.lastError {Text(error).font(.system(size:11)).foregroundStyle(.orange).lineLimit(3)}
                             }
+                            .accessibilityElement(children:.combine)
                             Spacer()
                             Toggle("启用",isOn:Binding(get:{root.enabled},set:{model.setRoot(root,enabled:$0)})).labelsHidden().toggleStyle(.switch).controlSize(.small).accessibilityLabel("启用索引位置：\(root.name)")
                             Button {rootToRemove=root} label:{Image(systemName:"minus.circle")}.buttonStyle(.borderless).help("移除此位置的索引").accessibilityLabel("移除索引位置：\(root.name)")
@@ -64,7 +73,7 @@ struct SettingsView:View {
                     LabeledContent("提取异常",value:model.statistics.errors.formatted())
                     HStack {Button(model.paused ? "继续建立索引" : "暂停建立索引") {model.togglePause()};Spacer();Button("重新提取内容") {model.retryContent()}}
                     Divider()
-                    Text("觅迹 \(Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.0.1") · 全局快捷键 ⌃⌥Space\n索引保存在 ~/Library/Application Support/Miji").font(.caption).foregroundStyle(.secondary)
+                    Text("\(Self.versionLine) · 全局快捷键 ⌃⌥Space\n索引保存在 ~/Library/Application Support/Miji").font(.caption).foregroundStyle(.secondary)
                 }
             }.formStyle(.grouped)
         }.frame(width:720,height:650)
@@ -72,5 +81,21 @@ struct SettingsView:View {
             Button("移除索引",role:.destructive) {if let root=rootToRemove {model.removeRoot(root)};rootToRemove=nil}
             Button("取消",role:.cancel) {rootToRemove=nil}
         } message:{Text("只删除觅迹保存的目录与提取内容，原文件保留。")}
+    }
+    /// The version comes from the bundle only; without one the line names the app alone.
+    private static var versionLine:String {
+        (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String).map {"觅迹 \($0)"} ?? "觅迹"
+    }
+}
+
+/// System Settings style row icon: a white symbol on a softly graded rounded square.
+private struct SettingsIconTile:View {
+    let symbol:String
+    let color:Color
+    var body:some View {
+        RoundedRectangle(cornerRadius:7,style:.continuous)
+            .fill(LinearGradient(colors:[color.opacity(0.85),color],startPoint:.top,endPoint:.bottom))
+            .overlay(Image(systemName:symbol).font(.system(size:14,weight:.semibold)).foregroundStyle(.white))
+            .frame(width:28,height:28)
     }
 }

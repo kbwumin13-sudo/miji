@@ -26,6 +26,9 @@ struct MainView: View {
                         ResultPreviewPane(model: model).frame(width: AppModel.previewWidth)
                     }
                 }
+                // The results region takes exactly the space left by the fixed bars, so no state can
+                // push the search field or status bar out of the panel.
+                .frame(minHeight: 0, maxHeight: .infinity).clipped()
                 Divider()
             }
             footer
@@ -166,20 +169,21 @@ struct MainView: View {
         }
     }
 
+    /// Fits the 126 pt results area of the smallest panel (two rows), including the reset button.
     private var emptyState: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             if model.searchStatus.phase == .searching || model.searchStatus.phase == .supplementing {
-                ProgressView().controlSize(.regular).padding(.bottom, 4).accessibilityHidden(true)
+                ProgressView().controlSize(.small).frame(height: 24).accessibilityHidden(true)
             } else {
                 Image(systemName: model.searchStatus.phase == .failed ? "exclamationmark.triangle" : "magnifyingglass")
-                    .font(.system(size: 30, weight: .light)).foregroundStyle(.tertiary).padding(.bottom, 2).accessibilityHidden(true)
+                    .font(.system(size: 22, weight: .light)).foregroundStyle(.tertiary).frame(height: 24).accessibilityHidden(true)
             }
-            Text(emptyTitle).font(.system(size: 14, weight: .semibold))
-            Text(emptyDetail).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).lineLimit(3)
+            Text(emptyTitle).font(.system(size: 13, weight: .semibold))
+            Text(emptyDetail).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).lineLimit(2)
             if model.searchStatus.phase == .complete && !model.activeFilters.isEmpty {
-                Button("重置界面筛选") { model.resetInterfaceFilters() }.controlSize(.small).padding(.top, 4)
+                Button("重置界面筛选") { model.resetInterfaceFilters() }.controlSize(.small)
             }
-        }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.padding(.horizontal, 28).padding(.vertical, 10).frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityElement(children: .contain)
     }
     private var emptyTitle: String {

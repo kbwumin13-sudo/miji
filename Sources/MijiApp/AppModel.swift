@@ -30,6 +30,7 @@ struct SearchStatus {
     let milliseconds: Double?
     let timing: SearchTiming?
     let error: String?
+    let isLimited: Bool
 }
 enum SearchFilterID: String { case kind, root, scope, sort, onlineOnly }
 struct SearchFilter: Identifiable {
@@ -69,6 +70,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var searchPhase = SearchPhase.idle
     @Published private(set) var firstBatchMilliseconds: Double?
     @Published private(set) var completedMilliseconds: Double?
+    @Published private(set) var searchLimited = false
     @Published private(set) var searchError: String?
     private var generation: UInt64 = 0
     private var searchStartedAt = Date()
@@ -118,6 +120,7 @@ final class AppModel: ObservableObject {
     private var refreshAgain = false
     private var searchNeedsRefresh = false
     private let searchExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])?
+    private let testContentDelay: TimeInterval
     private let supplementaryExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])?
     private var observers: [NSObjectProtocol] = []
     var openMain: (() -> Void)?
@@ -135,6 +138,9 @@ final class AppModel: ObservableObject {
         self.searchExecutor=searchExecutor
         self.supplementaryExecutor=supplementaryExecutor
         let env=ProcessInfo.processInfo.environment
+        // A bounded, cancellable QA delay makes the real pending state observable.
+        // It is disabled outside explicitly isolated UI test launches.
+        testContentDelay = env["MIJI_UI_TESTING"] == "1" ? min(5000,max(0,Double(env["MIJI_UI_CONTENT_DELAY_MS"] ?? "0") ?? 0))/1000 : 0
         let support=env["MIJI_DATA_DIR"].map { URL(fileURLWithPath:$0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Miji")
         do {
             try FileManager.default.createDirectory(at:support,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -254,7 +260,7 @@ final class AppModel: ObservableObject {
         let token=UUID(); searchToken=token
         generation += 1
         currentSnapshot=makeSnapshot(generation: generation)
-        firstBatchMilliseconds=nil; completedMilliseconds=nil; searchError=nil
+        firstBatchMilliseconds=nil; completedMilliseconds=nil; searchError=nil; searchLimited=false
         previewTicket?.cancel(); previewKey=nil; clearPreview()
         searchPhase = searchVisible && !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ? .searching : .idle
         searching = searchPhase == .searching
@@ -305,9 +311,14 @@ final class AppModel: ObservableObject {
                         let finished=options.scope == .name
                         self.publish(names,token:token,ticket:ticket,elapsed:options.scope == .name || !names.isEmpty ? Date().timeIntervalSince(typedAt)*1000 : nil,finished:finished)
                         guard !finished,let contentDatabase=self.contentDatabase else { return }
-                        let supplement=self.supplementaryExecutor
+                        let supplement=self.supplementaryExecutor, testDelay=self.testContentDelay
                         self.contentQueue.async { [weak self] in
                             guard !ticket.isCancelled else { return }
+                            if testDelay > 0 {
+                                let until=Date().addingTimeInterval(testDelay)
+                                while Date() < until && !ticket.isCancelled { Thread.sleep(forTimeInterval:0.01) }
+                                guard !ticket.isCancelled else {return}
+                            }
                             do {
                                 func merge(_ extra:[SearchHit])->[SearchHit] {
                                     SearchResultMerger.merge(nameResults:names,contentResults:extra,scope:options.scope,sort:options.sort,limit:options.limit,query:text)
@@ -432,7 +443,7 @@ final class AppModel: ObservableObject {
     var searchStatus: SearchStatus {
         SearchStatus(phase:searchPhase,count:displayedSnapshot == currentSnapshot ? hits.count : 0,
                      milliseconds:completedMilliseconds ?? firstBatchMilliseconds,
-                     timing:completedMilliseconds != nil ? .complete : (firstBatchMilliseconds != nil ? .firstBatch : nil),error:searchError)
+                     timing:completedMilliseconds != nil ? .complete : (firstBatchMilliseconds != nil ? .firstBatch : nil),error:searchError,isLimited:searchLimited)
     }
     var activeFilters: [SearchFilter] {
         var result: [SearchFilter] = []

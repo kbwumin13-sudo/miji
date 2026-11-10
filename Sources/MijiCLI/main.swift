@@ -113,6 +113,8 @@ do {
     } else {
         print("""
         觅迹命令行诊断工具
+          miji-cli quality-index --database FILE --manifest FILE [--order forward|reverse|random]
+          miji-cli quality-search --database FILE --query TEXT [--scope content|all|name] [--trace]
           miji-cli migrate --source OLD_INDEX --destination NEW_INDEX
           miji-cli benchmark --database FILE [--immutable] [--rounds 20] [--queries '数学|README']
           miji-cli benchmark-content --database FILE [--rounds 3] [--timeout 10] [--queries '数学|OCR']

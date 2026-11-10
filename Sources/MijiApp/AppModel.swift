@@ -324,6 +324,7 @@ final class AppModel: ObservableObject {
                                     SearchResultMerger.merge(nameResults:names,contentResults:extra,scope:options.scope,sort:options.sort,limit:options.limit,query:text)
                                 }
                                 var deliveredPartial=false
+                                var limited=false
                                 let extra:[SearchHit]
                                 if let supplement {extra=try supplement(contentDatabase,text,options,{ticket.isCancelled})}
                                 else {
@@ -333,11 +334,12 @@ final class AppModel: ObservableObject {
                                         let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(typedAt)*1000 : nil
                                         deliveredPartial=true
                                         DispatchQueue.main.async {self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:false)}
-                                    })
+                                    },onMetrics:{ metrics in limited=metrics.budgetExhausted || metrics.resultTruncated })
                                 }
                                 let result=merge(extra)
                                 let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(typedAt)*1000 : nil
-                                DispatchQueue.main.async { self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:true) }
+                                let finalLimited=limited
+                                DispatchQueue.main.async { self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:true,limited:finalLimited) }
                             } catch { DispatchQueue.main.async { self?.searchFailed(error,token:token,ticket:ticket) } }
                         }
                     }
@@ -346,9 +348,10 @@ final class AppModel: ObservableObject {
         }
         searchWork=item; DispatchQueue.main.asyncAfter(deadline:.now()+0.035,execute:item)
     }
-    private func publish(_ result:[SearchHit],token:UUID,ticket:SearchTicket,elapsed:Double?,finished:Bool) {
+    private func publish(_ result:[SearchHit],token:UUID,ticket:SearchTicket,elapsed:Double?,finished:Bool,limited:Bool? = nil) {
         guard searchToken==token,!ticket.isCancelled else { return }
         let previous=selected
+        if let limited {searchLimited=limited}
         hits=result; displayedSnapshot=currentSnapshot; searching = !finished
         searchPhase = finished ? .complete : (result.isEmpty ? .searching : .supplementing)
         if firstBatchMilliseconds == nil && !result.isEmpty { firstBatchMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }

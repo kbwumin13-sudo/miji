@@ -61,7 +61,7 @@ final class GUIQualityEvaluationTests: XCTestCase {
             let stable=frames.first { Array($0.paths.prefix(10)) == Array(finalPaths.prefix(10)) && Array($0.snippets.prefix(10)) == Array(finalSnippets.prefix(10)) }?.ms
             let firstTarget=finalPaths.firstIndex { query.targets.contains($0) }.map {$0+1}
             reports.append(["id":query.id,"query":query.query,"scope":query.scope,"holdout":query.holdout,
-                            "successAt5":finalPaths.prefix(5).contains {query.targets.contains($0)},
+                            "isLimited":model.searchStatus.isLimited,"successAt5":finalPaths.prefix(5).contains {query.targets.contains($0)},
                             "firstTargetRank":firstTarget as Any? ?? NSNull(),"firstRelevantMS":first as Any? ?? NSNull(),
                             "topTenStableAndReadyMS":stable as Any? ?? NSNull(),
                             "completedMS":model.completedMilliseconds as Any? ?? NSNull(),"paths":finalPaths,

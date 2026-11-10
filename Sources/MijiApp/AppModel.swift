@@ -488,8 +488,8 @@ final class AppModel: ObservableObject {
         if !hit.root.isOnline { state = .diskOffline; text="磁盘「\(volume)」未连接 · 可查看已索引内容" }
         else if PreviewResolver.localURL(for:hit) == nil { state = .fileUnavailable; text="磁盘在线，但文件已移动、删除、未下载或无法读取" }
         else if hit.file.contentState == "error" { state = .extractionFailed; text="内容提取失败 · 文件名仍可搜索" }
-        else if hit.file.contentError != nil { state = .partial; text="仅有部分已索引内容" }
         else if selectedID == hit.id && !previewLoading && !previewText.isEmpty && hit.file.fileExtension.lowercased() == "pdf" && previewPDF == nil { state = .indexedOnly; text="原文不可预览 · 显示已索引内容" }
+        else if contentMessage != nil { state = .partial; text="仅有部分已索引内容或位置受限" }
         else { state = .available; text=nil }
         return ResultAvailability(state:state,message:text,volumeName:volume,contentMessage:contentMessage)
     }

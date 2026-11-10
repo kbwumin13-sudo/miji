@@ -149,4 +149,33 @@ final class SearchResultValidityTests: XCTestCase {
         XCTAssertNil(model.completedMilliseconds)
     }
 
+    @MainActor func testUnavailableOriginalKeepsStoredTextAndExtractionStatesAreDistinct() async throws {
+        _=try populate()
+        let db=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+        let root=try XCTUnwrap(db.roots().first)
+        var hits:[SearchHit]=[]
+        for (name,state) in [("unpreviewable.pdf","done"),("partial.txt","partial"),("failed.txt","error")] {
+            let file=directory.appendingPathComponent(name)
+            try Data("invalid original fixture".utf8).write(to:file)
+            let signature=try FileSignature.read(file)
+            try db.upsertFiles([FileRecord(rootID:root.id,relativePath:name,name:name,fileExtension:file.pathExtension,kind:.document,size:signature.size,modified:signature.modified,inode:signature.inode)],generation:1)
+            let record=try XCTUnwrap(db.pendingFiles(rootID:root.id).first {$0.name == name})
+            if state == "error" { try db.failContent(file:record,message:"合成提取错误") }
+            else { XCTAssertTrue(try db.completeContent(file:record,content:ExtractedContent(text:"saved fixture body",warning:state == "partial" ? "只提取了部分内容" : nil))) }
+            hits.append(try XCTUnwrap(db.search(name,options:SearchOptions(scope:.name)).first))
+        }
+        let model=AppModel(searchExecutor:{_,_,_,_ in hits});model.service?.stop()
+        model.setSearchVisible(true);model.query="fixture"
+        try await waitUntil {!model.previewLoading && !model.previewText.isEmpty}
+        let pdf=try XCTUnwrap(hits.first)
+        model.selectedID=pdf.id
+        try await waitUntil {!model.previewLoading && !model.previewText.isEmpty}
+        XCTAssertEqual(model.resultAvailability(pdf).state,.indexedOnly)
+        XCTAssertTrue(model.previewText.contains("saved fixture body"))
+        model.selectedID=hits[1].id
+        try await waitUntil {!model.previewLoading && model.previewWarning != nil}
+        XCTAssertEqual(model.resultAvailability(hits[1]).state,.partial)
+        XCTAssertEqual(model.resultAvailability(hits[2]).state,.extractionFailed)
+    }
+
 }

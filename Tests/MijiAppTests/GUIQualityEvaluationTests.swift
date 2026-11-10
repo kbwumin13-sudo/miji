@@ -57,12 +57,13 @@ final class GUIQualityEvaluationTests: XCTestCase {
             XCTAssertEqual(model.searchPhase,.complete,"\(query.id): query must reach completion")
             let finalPaths=model.hits.map {$0.root.id + "/" + $0.file.relativePath}
             let finalSnippets=model.hits.map(\.snippet)
+            XCTAssertTrue(finalPaths.allSatisfy {query.labels[$0] != nil},"\(query.id): unlabelled results must be reviewed")
             let first=frames.first { frame in frame.paths.contains { (query.labels[$0] ?? 0) >= 2 } }?.ms
             let stable=frames.first { Array($0.paths.prefix(10)) == Array(finalPaths.prefix(10)) && Array($0.snippets.prefix(10)) == Array(finalSnippets.prefix(10)) }?.ms
-            let firstTarget=finalPaths.firstIndex { query.targets.contains($0) }.map {$0+1}
+            let firstTarget=finalPaths.firstIndex { query.labels[$0] == 3 }.map {$0+1}
             reports.append(["id":query.id,"query":query.query,"scope":query.scope,"holdout":query.holdout,
-                            "isLimited":model.searchStatus.isLimited,"successAt5":finalPaths.prefix(5).contains {query.targets.contains($0)},
-                            "firstTargetRank":firstTarget as Any? ?? NSNull(),"firstRelevantMS":first as Any? ?? NSNull(),
+                            "isLimited":model.searchStatus.isLimited,"successAt5":finalPaths.prefix(5).contains {query.labels[$0] == 3},
+                            "firstCorrectRank":firstTarget as Any? ?? NSNull(),"firstRelevantMS":first as Any? ?? NSNull(),
                             "topTenStableAndReadyMS":stable as Any? ?? NSNull(),
                             "completedMS":model.completedMilliseconds as Any? ?? NSNull(),"paths":finalPaths,
                             "topTenSnippets":Array(finalSnippets.prefix(10))])

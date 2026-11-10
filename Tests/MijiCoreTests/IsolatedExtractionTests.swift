@@ -211,7 +211,8 @@ final class IsolatedExtractionTests: XCTestCase {
         XCTAssertEqual(hung.contentState, "error")
         XCTAssertFalse(hung.contentError?.isEmpty ?? true)
         for name in names where name != "hung.png" {
-            XCTAssertEqual(try database.search(name).first?.file.contentState, "done", name)
+            let file=try database.search(name).first?.file
+            XCTAssertEqual(file?.contentState, "done", "\(name): \(file?.contentError ?? "无错误信息")")
         }
         let stats = try database.statistics()
         XCTAssertEqual(stats.pending, 0)

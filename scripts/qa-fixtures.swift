@@ -5,7 +5,7 @@ import ImageIO
 import UniformTypeIdentifiers
 
 // Independently drawn fixtures; no user files, screenshots or network assets.
-guard CommandLine.arguments.count == 2 else {
+guard (2...3).contains(CommandLine.arguments.count) else {
     fputs("Usage: swift scripts/qa-fixtures.swift FIXTURE_DIRECTORY\n", stderr)
     exit(2)
 }
@@ -62,3 +62,19 @@ try pdf("向量文档.pdf", lines: ["觅迹文档检索验收", "纸上银河：
 try pdf("扫描文档.pdf", lines: [], rasterOnly: true)
 try pdf("iWork预览素材.pdf", lines: ["觅迹 iWork 内嵌预览验收", "预览星河：以 Preview.pdf 读取文档。", "未解析 IWA，预览外内容不在验收范围。"])
 print(output.path)
+
+// Optional search-quality corpus: render its declared PDFs and OCR image.
+if CommandLine.arguments.count == 3 {
+    let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))
+    let manifest = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    for doc in manifest["documents"] as! [[String: Any]] {
+        let path = (doc["root"] as! String) + "/" + (doc["path"] as! String)
+        let target = output.appendingPathComponent(path)
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if target.pathExtension == "pdf" {
+            try pdf(path, lines: (doc["text"] as! String).components(separatedBy: "\n"))
+        } else if target.pathExtension == "png" {
+            try FileManager.default.copyItem(at: png, to: target)
+        }
+    }
+}

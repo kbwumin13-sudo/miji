@@ -7,7 +7,11 @@ let args=Array(CommandLine.arguments.dropFirst())
 func option(_ name:String) -> String? { guard let index=args.firstIndex(of:name),args.count>index+1 else{return nil};return args[index+1] }
 do {
     let command=args.first ?? "help"
-    if command == "benchmark-content" {
+    if command == "quality-index" {
+        try QualityEvaluation.index(arguments: args)
+    } else if command == "quality-search" {
+        try QualityEvaluation.search(arguments: args)
+    } else if command == "benchmark-content" {
         guard let path=option("--database") else {throw NSError(domain:"MijiCLI",code:1,userInfo:[NSLocalizedDescriptionKey:"缺少 --database"])}
         let database=try SearchDatabase(url:URL(fileURLWithPath:path),readOnly:true)
         let queries=option("--queries")?.components(separatedBy:"|") ?? ["数学","数学分析","OCR","README"]
@@ -18,12 +22,13 @@ do {
                 let start=DispatchTime.now().uptimeNanoseconds
                 let deadline=start+UInt64(timeout*1_000_000_000)
                 var firstMS:Double?
+                var metrics = SearchMetrics()
                 do {
-                    let hits=try database.searchSupplementary(query,options:SearchOptions(scope:.content,limit:500),cancelled:{DispatchTime.now().uptimeNanoseconds>=deadline},onPartial:{_ in if firstMS==nil {firstMS=Double(DispatchTime.now().uptimeNanoseconds-start)/1_000_000}})
-                    let value:[String:Any]=["query":query,"round":round,"count":hits.count,"first_ms":firstMS.map{$0 as Any} ?? NSNull(),"ms":Double(DispatchTime.now().uptimeNanoseconds-start)/1_000_000]
+                    let hits=try database.searchSupplementary(query,options:SearchOptions(scope:.content,limit:500),cancelled:{DispatchTime.now().uptimeNanoseconds>=deadline},onPartial:{_ in if firstMS==nil {firstMS=Double(DispatchTime.now().uptimeNanoseconds-start)/1_000_000}},onMetrics:{metrics=$0})
+                    let value:[String:Any]=["metrics":try encoded(metrics),"query":query,"round":round,"count":hits.count,"first_ms":firstMS.map{$0 as Any} ?? NSNull(),"ms":Double(DispatchTime.now().uptimeNanoseconds-start)/1_000_000]
                     FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject:value,options:.sortedKeys));FileHandle.standardOutput.write(Data([10]))
                 } catch is CancellationError {
-                    let value:[String:Any]=["query":query,"round":round,"first_ms":firstMS.map{$0 as Any} ?? NSNull(),"timeout_seconds":timeout]
+                    let value:[String:Any]=["metrics":try encoded(metrics),"query":query,"round":round,"first_ms":firstMS.map{$0 as Any} ?? NSNull(),"timeout_seconds":timeout]
                     FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject:value,options:.sortedKeys));FileHandle.standardOutput.write(Data([10]))
                     break
                 }
@@ -108,6 +113,8 @@ do {
     } else {
         print("""
         觅迹命令行诊断工具
+          miji-cli quality-index --database FILE --manifest FILE [--order forward|reverse|random]
+          miji-cli quality-search --database FILE --query TEXT [--scope content|all|name] [--trace]
           miji-cli migrate --source OLD_INDEX --destination NEW_INDEX
           miji-cli benchmark --database FILE [--immutable] [--rounds 20] [--queries '数学|README']
           miji-cli benchmark-content --database FILE [--rounds 3] [--timeout 10] [--queries '数学|OCR']

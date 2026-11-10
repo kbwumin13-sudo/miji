@@ -4,7 +4,7 @@ import MijiCore
 
 final class SearchSchedulingTests: XCTestCase {
     @MainActor
-    func testFullNamePageDoesNotRunUnusedGlobalContentQuery() async throws {
+    func testFullNamePageStillRunsSupplementaryContentQuery() async throws {
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let oldDirectory=getenv("MIJI_DATA_DIR").map {String(cString:$0)},oldAuto=getenv("MIJI_NO_AUTOSTART").map {String(cString:$0)}
         setenv("MIJI_DATA_DIR",directory.path,1);setenv("MIJI_NO_AUTOSTART","1",1)
@@ -19,11 +19,13 @@ final class SearchSchedulingTests: XCTestCase {
             let name="README-\(i).txt"
             return FileRecord(rootID:"r",relativePath:name,name:name,fileExtension:"txt",kind:.document,size:1,modified:1,inode:1)
         },generation:1)
-        let model=AppModel(supplementaryExecutor:{_,_,_,_ in XCTFail("500个文件名已占满默认结果页，无需再全库找正文");return []})
+        let supplementary=expectation(description:"名称满页仍检索正文");supplementary.assertForOverFulfill=false
+        let model=AppModel(supplementaryExecutor:{_,_,_,_ in supplementary.fulfill();return []})
         defer {model.service?.stop()}
         model.setSearchVisible(true);model.query="README"
         for _ in 0..<300 where model.hits.count<500 || model.searching {try await Task.sleep(nanoseconds:10_000_000)}
         XCTAssertEqual(model.hits.count,500);XCTAssertFalse(model.searching)
+        await fulfillment(of:[supplementary],timeout:1)
     }
     @MainActor
     func testBodyExclusionsDoNotHideNameCandidateBeyondFirstPage() async throws {

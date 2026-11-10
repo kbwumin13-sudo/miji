@@ -10,6 +10,46 @@ private final class SearchTicket: @unchecked Sendable {
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
 }
 
+/// Every condition that affects the result set, plus a monotonic request generation.
+struct SearchSnapshot: Equatable {
+    let generation: UInt64
+    let query: String
+    let kind: FileKind?
+    let rootID: String?
+    let scope: SearchScope
+    let sort: SearchSort
+    let onlineOnly: Bool
+    let limit: Int
+}
+
+enum SearchPhase: Equatable { case idle, searching, supplementing, complete, failed }
+enum SearchTiming: Equatable { case firstBatch, complete }
+struct SearchStatus {
+    let phase: SearchPhase
+    let count: Int
+    let milliseconds: Double?
+    let timing: SearchTiming?
+    let error: String?
+    let isLimited: Bool
+}
+enum SearchFilterID: String { case kind, root, scope, sort, onlineOnly }
+struct SearchFilter: Identifiable {
+    let id: SearchFilterID
+    let label: String
+}
+struct ResultLocation {
+    let short: String
+    let fullPath: String
+}
+enum ResultAvailabilityState { case available, diskOffline, fileUnavailable, indexedOnly, partial, extractionFailed }
+struct ResultAvailability {
+    let state: ResultAvailabilityState
+    let message: String?
+    let volumeName: String
+    let contentMessage: String?
+}
+enum FileAction { case open, reveal, copyFile, copyPath, quickLook, preview, openAtLine }
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var query = "" { didSet { scheduleSearch() } }
@@ -25,6 +65,15 @@ final class AppModel: ObservableObject {
     @Published var scope = SearchScope.all { didSet { scheduleSearch() } }
     @Published var sort = SearchSort.relevance { didSet { scheduleSearch() } }
     @Published var paused = false
+    @Published private(set) var currentSnapshot: SearchSnapshot?
+    @Published private(set) var displayedSnapshot: SearchSnapshot?
+    @Published private(set) var searchPhase = SearchPhase.idle
+    @Published private(set) var firstBatchMilliseconds: Double?
+    @Published private(set) var completedMilliseconds: Double?
+    @Published private(set) var searchLimited = false
+    @Published private(set) var searchError: String?
+    private var generation: UInt64 = 0
+    private var searchStartedAt = Date()
     @Published var searching = false
     @Published var searchMilliseconds:Double = 0
     @Published var message: String?
@@ -71,6 +120,7 @@ final class AppModel: ObservableObject {
     private var refreshAgain = false
     private var searchNeedsRefresh = false
     private let searchExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])?
+    private let testContentDelay: TimeInterval
     private let supplementaryExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])?
     private var observers: [NSObjectProtocol] = []
     var openMain: (() -> Void)?
@@ -88,6 +138,9 @@ final class AppModel: ObservableObject {
         self.searchExecutor=searchExecutor
         self.supplementaryExecutor=supplementaryExecutor
         let env=ProcessInfo.processInfo.environment
+        // A bounded, cancellable QA delay makes the real pending state observable.
+        // It is disabled outside explicitly isolated UI test launches.
+        testContentDelay = env["MIJI_UI_TESTING"] == "1" ? min(5000,max(0,Double(env["MIJI_UI_CONTENT_DELAY_MS"] ?? "0") ?? 0))/1000 : 0
         let support=env["MIJI_DATA_DIR"].map { URL(fileURLWithPath:$0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Miji")
         do {
             try FileManager.default.createDirectory(at:support,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -102,6 +155,10 @@ final class AppModel: ObservableObject {
             contentDatabase=content; previewDatabase=preview; nameEngine=engine
             let worker=Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("miji-extract")
             service=IndexService(database:writer,ignoredPaths:[support.path],extractionWorker:worker)
+            // Freeze authored QA data before refresh/configuration can wake work.
+            if AppDelegate.isBackgroundUITesting && env["MIJI_UI_PAUSE_INDEX"] == "1" {
+                paused=true;service?.setPaused(true)
+            }
         } catch { database=nil; searchDatabase=nil; statusDatabase=nil; contentDatabase=nil; previewDatabase=nil; nameEngine=nil; service=nil; message="索引数据库无法打开：\(error.localizedDescription)" }
         if let data=UserDefaults.standard.data(forKey:"indexingPreferences"), let saved=try? JSONDecoder().decode(IndexingPreferences.self,from:data) { preferences=saved }
         if env["MIJI_NO_AUTOSTART"] == "1" { preferences.autoAddExternal=false }
@@ -205,6 +262,12 @@ final class AppModel: ObservableObject {
         searchWork?.cancel(); searchWork=nil; searchTicket?.cancel(); searching=false; searchNeedsRefresh=false
         activityWork?.cancel()
         let token=UUID(); searchToken=token
+        generation += 1
+        currentSnapshot=makeSnapshot(generation: generation)
+        firstBatchMilliseconds=nil; completedMilliseconds=nil; searchError=nil; searchLimited=false
+        previewTicket?.cancel(); previewKey=nil; clearPreview()
+        searchPhase = searchVisible && !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ? .searching : .idle
+        searching = searchPhase == .searching
         guard searchVisible, !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else {
             service?.setUserActive(false)
             if query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { hits=[]; selectedID=nil; searchMilliseconds=0 }
@@ -215,10 +278,14 @@ final class AppModel: ObservableObject {
         activityWork=release; DispatchQueue.main.asyncAfter(deadline:.now()+0.8,execute:release)
         let ticket=SearchTicket(); searchTicket=ticket
         let text=query; let options=SearchOptions(kind:kind,rootID:rootID,scope:scope,sort:sort,onlineOnly:!preferences.retainOffline,limit:500)
-        let typedAt=Date()
+        let typedAt=Date(); searchStartedAt=typedAt
         let item=DispatchWorkItem { [weak self] in
-            guard let self, !ticket.isCancelled, let database=self.searchDatabase else { return }
-            self.searchWork=nil; self.searching=true
+            guard let self, !ticket.isCancelled else { return }
+            self.searchWork=nil
+            guard let database=self.searchDatabase else {
+                self.searchFailed(NSError(domain:"Miji.Search",code:1,userInfo:[NSLocalizedDescriptionKey:"索引数据库无法打开"]),token:token,ticket:ticket); return
+            }
+            self.searching=true
             let execute=self.searchExecutor, engine=self.nameEngine
             self.searchQueue.async { [weak self] in
                 guard !ticket.isCancelled else { return }
@@ -245,29 +312,23 @@ final class AppModel: ObservableObject {
                     let names=first
                     DispatchQueue.main.async {
                         guard let self,self.searchToken==token,!ticket.isCancelled else { return }
-                        let finished=options.scope == .name || (options.scope == .all && options.sort == .relevance && names.count>=options.limit)
+                        let finished=options.scope == .name
                         self.publish(names,token:token,ticket:ticket,elapsed:options.scope == .name || !names.isEmpty ? Date().timeIntervalSince(typedAt)*1000 : nil,finished:finished)
                         guard !finished,let contentDatabase=self.contentDatabase else { return }
-                        let supplement=self.supplementaryExecutor
+                        let supplement=self.supplementaryExecutor, testDelay=self.testContentDelay
                         self.contentQueue.async { [weak self] in
                             guard !ticket.isCancelled else { return }
+                            if testDelay > 0 {
+                                let until=Date().addingTimeInterval(testDelay)
+                                while Date() < until && !ticket.isCancelled { Thread.sleep(forTimeInterval:0.01) }
+                                guard !ticket.isCancelled else {return}
+                            }
                             do {
                                 func merge(_ extra:[SearchHit])->[SearchHit] {
-                                    let decorated=Dictionary(uniqueKeysWithValues:extra.map {($0.id,$0)})
-                                    var ids=Set(names.map(\.id))
-                                    var merged=names.map {decorated[$0.id] ?? $0} + extra.filter { ids.insert($0.id).inserted }
-                                    if options.sort != .relevance {
-                                        merged.sort {
-                                            if options.sort == .modified && $0.file.modified != $1.file.modified { return $0.file.modified > $1.file.modified }
-                                            if options.sort == .size && $0.file.size != $1.file.size { return $0.file.size > $1.file.size }
-                                            let a=$0.file.name.precomposedStringWithCanonicalMapping.lowercased().precomposedStringWithCanonicalMapping
-                                            let b=$1.file.name.precomposedStringWithCanonicalMapping.lowercased().precomposedStringWithCanonicalMapping
-                                            return a == b ? $0.id < $1.id : a < b
-                                        }
-                                    }
-                                    return Array(merged.prefix(options.limit))
+                                    SearchResultMerger.merge(nameResults:names,contentResults:extra,scope:options.scope,sort:options.sort,limit:options.limit,query:text)
                                 }
                                 var deliveredPartial=false
+                                var limited=false
                                 let extra:[SearchHit]
                                 if let supplement {extra=try supplement(contentDatabase,text,options,{ticket.isCancelled})}
                                 else {
@@ -277,11 +338,12 @@ final class AppModel: ObservableObject {
                                         let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(typedAt)*1000 : nil
                                         deliveredPartial=true
                                         DispatchQueue.main.async {self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:false)}
-                                    })
+                                    },onMetrics:{ metrics in limited=metrics.budgetExhausted || metrics.resultTruncated })
                                 }
                                 let result=merge(extra)
                                 let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(typedAt)*1000 : nil
-                                DispatchQueue.main.async { self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:true) }
+                                let finalLimited=limited
+                                DispatchQueue.main.async { self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:true,limited:finalLimited) }
                             } catch { DispatchQueue.main.async { self?.searchFailed(error,token:token,ticket:ticket) } }
                         }
                     }
@@ -290,28 +352,37 @@ final class AppModel: ObservableObject {
         }
         searchWork=item; DispatchQueue.main.asyncAfter(deadline:.now()+0.035,execute:item)
     }
-    private func publish(_ result:[SearchHit],token:UUID,ticket:SearchTicket,elapsed:Double?,finished:Bool) {
+    private func publish(_ result:[SearchHit],token:UUID,ticket:SearchTicket,elapsed:Double?,finished:Bool,limited:Bool? = nil) {
         guard searchToken==token,!ticket.isCancelled else { return }
-        hits=result; searching = !finished
+        let previous=selected
+        if let limited {searchLimited=limited}
+        hits=result; displayedSnapshot=currentSnapshot; searching = !finished
+        searchPhase = finished ? .complete : (result.isEmpty ? .searching : .supplementing)
+        if firstBatchMilliseconds == nil && !result.isEmpty { firstBatchMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
+        if finished { completedMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
         if let elapsed { searchMilliseconds=elapsed }
-        if !result.contains(where:{$0.id==selectedID}) { selectedID=result.first?.id }
-        else { loadPreview() }
+        let preserved=previous.flatMap { old in result.first { $0.file.rootID == old.file.rootID && $0.file.relativePath == old.file.relativePath } }
+        if let preserved { if selectedID != preserved.id { selectedID=preserved.id } else { loadPreview() } }
+        else { selectedID=result.first?.id }
         if finished && searchNeedsRefresh { scheduleSearch() }
     }
     private func searchFailed(_ error:Error,token:UUID,ticket:SearchTicket) {
         guard searchToken==token,!ticket.isCancelled else { return }
         searching=false
-        if !(error is CancellationError) { message=error.localizedDescription }
+        if !(error is CancellationError) {
+            searchPhase = .failed; searchError=error.localizedDescription
+            message="搜索失败：\(error.localizedDescription)"
+        }
     }
     func loadPreview() {
-        guard searchVisible,previewVisible,let hit=selected,SearchPreviewPolicy.hasContent(hit),let database=previewDatabase else {
+        guard searchVisible,previewVisible,let hit=selected,isCurrentResult(hit),SearchPreviewPolicy.hasContent(hit),let database=previewDatabase else {
             previewTicket?.cancel();previewKey=nil;clearPreview();return
         }
         let key="\(hit.id)|\(hit.path)|\(hit.file.inode)|\(hit.file.modified)|\(hit.file.size)|\(hit.file.contentState)|\(hit.file.contentError ?? "")|\(hit.root.isOnline)|\(query)|\(hit.matchedIn)|\(hit.snippet)|\(hit.labels)"
         guard key != previewKey else{return}
         previewTicket?.cancel();previewKey=key;previewQuery=query;clearPreview()
         let ticket=SearchTicket();previewTicket=ticket;previewLoading=true
-        let query=query
+        let query=query, snapshot=displayedSnapshot
         previewQueue.async { [weak self] in
             guard !ticket.isCancelled else{return}
             let content=try? database.storedContent(fileID:hit.id)
@@ -333,7 +404,7 @@ final class AppModel: ObservableObject {
                 } else { resolution.warning="PDF 较大，使用快速查看打开原文件" }
             }
             DispatchQueue.main.async {
-                guard let self,!ticket.isCancelled,self.searchVisible,self.selectedID==hit.id else { return }
+                guard let self,!ticket.isCancelled,self.searchVisible,self.selectedID==hit.id,self.displayedSnapshot==snapshot,self.isCurrentResult(hit) else { return }
                 self.previewText=resolution.text;self.previewWarning=resolution.warning
                 self.previewLocalURL=localURL;self.previewPage=resolution.page;self.previewLine=resolution.line;self.previewPDF=document;self.previewLoading=false
             }
@@ -373,32 +444,116 @@ final class AppModel: ObservableObject {
         service?.configure(preferences); scheduleSearch()
     }
     func togglePause() { paused.toggle(); service?.setPaused(paused) }
-    func openSelected() {
-        guard let hit=selected else { return }
-        guard hit.root.isOnline, FileManager.default.fileExists(atPath:hit.path) else { message="请连接「\(hit.root.name)」后打开此文件。"; return }
-        if hit.file.kind == .code,let line=previewLine,CodeFileOpener.open(URL(fileURLWithPath:hit.path),line:line) {recordOpen(hit.id);return}
-        if !NSWorkspace.shared.open(URL(fileURLWithPath:hit.path)) { message="未能打开此文件，请检查文件是否仍存在。"; return }
-        recordOpen(hit.id)
+    private func makeSnapshot(generation: UInt64) -> SearchSnapshot {
+        SearchSnapshot(generation:generation,query:query,kind:kind,rootID:rootID,scope:scope,sort:sort,onlineOnly:!preferences.retainOffline,limit:500)
     }
-    func revealSelected() {
-        guard let hit=selected,hit.root.isOnline else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath:hit.path)])
-        recordOpen(hit.id)
+    var searchStatus: SearchStatus {
+        SearchStatus(phase:searchPhase,count:displayedSnapshot == currentSnapshot ? hits.count : 0,
+                     milliseconds:completedMilliseconds ?? firstBatchMilliseconds,
+                     timing:completedMilliseconds != nil ? .complete : (firstBatchMilliseconds != nil ? .firstBatch : nil),error:searchError,isLimited:searchLimited)
     }
+    var activeFilters: [SearchFilter] {
+        var result: [SearchFilter] = []
+        if let kind { result.append(SearchFilter(id:.kind,label:kind.title)) }
+        if let rootID { result.append(SearchFilter(id:.root,label:roots.first { $0.id == rootID }?.name ?? "指定位置")) }
+        if scope != .all { result.append(SearchFilter(id:.scope,label:scope == .name ? "仅文件名" : "仅内容")) }
+        if sort != .relevance { result.append(SearchFilter(id:.sort,label:sort == .modified ? "最近修改" : sort == .size ? "按大小" : "按名称")) }
+        if !preferences.retainOffline { result.append(SearchFilter(id:.onlineOnly,label:"仅在线")) }
+        return result
+    }
+    func removeFilter(_ id: SearchFilterID) {
+        switch id {
+        case .kind: kind=nil
+        case .root: rootID=nil
+        case .scope: scope = .all
+        case .sort: sort = .relevance
+        case .onlineOnly: preferences.retainOffline=true; savePreferences()
+        }
+    }
+    func resetInterfaceFilters() {
+        kind=nil; rootID=nil; scope = .all; sort = .relevance
+        if !preferences.retainOffline { preferences.retainOffline=true; savePreferences() }
+    }
+    private static func volumeName(_ root: IndexedRoot) -> String {
+        let parts=URL(fileURLWithPath:root.path).pathComponents
+        return parts.count > 2 && parts[1] == "Volumes" ? parts[2] : (root.isExternal ? root.name : "这台 Mac")
+    }
+    func resultLocation(_ hit: SearchHit) -> ResultLocation {
+        let parent=URL(fileURLWithPath:hit.path).deletingLastPathComponent()
+        let label=parent.path == "/" ? "/" : parent.lastPathComponent
+        let volume=Self.volumeName(hit.root)
+        return ResultLocation(short:"\(label) · \(volume)",fullPath:hit.path)
+    }
+    func resultAvailability(_ hit: SearchHit) -> ResultAvailability {
+        let volume=Self.volumeName(hit.root)
+        let contentMessage=hit.file.contentError ?? (selectedID == hit.id ? previewWarning : nil)
+        let state: ResultAvailabilityState
+        let text: String?
+        if !hit.root.isOnline { state = .diskOffline; text="磁盘「\(volume)」未连接 · 可查看已索引内容" }
+        else if PreviewResolver.localURL(for:hit) == nil { state = .fileUnavailable; text="磁盘在线，但文件已移动、删除、未下载或无法读取" }
+        else if hit.file.contentState == "error" { state = .extractionFailed; text="内容提取失败 · 文件名仍可搜索" }
+        else if selectedID == hit.id && !previewLoading && !previewText.isEmpty && hit.file.fileExtension.lowercased() == "pdf" && previewPDF == nil { state = .indexedOnly; text="原文不可预览 · 显示已索引内容" }
+        else if contentMessage != nil { state = .partial; text="仅有部分已索引内容或位置受限" }
+        else { state = .available; text=nil }
+        return ResultAvailability(state:state,message:text,volumeName:volume,contentMessage:contentMessage)
+    }
+    func isCurrentResult(_ hit: SearchHit, snapshot: SearchSnapshot? = nil) -> Bool {
+        guard let current=currentSnapshot, displayedSnapshot == current,
+              current == makeSnapshot(generation:generation),
+              snapshot == nil || snapshot == current else { return false }
+        return hits.contains { $0.id == hit.id && $0.file.rootID == hit.file.rootID && $0.path == hit.path && $0.file.inode == hit.file.inode && $0.file.modified == hit.file.modified && $0.file.size == hit.file.size }
+    }
+    /// One gate for every keyboard, row, menu, Quick Look and preview action.
+    @discardableResult
+    func validateResult(_ hit: SearchHit, for action: FileAction, snapshot: SearchSnapshot? = nil) -> Bool {
+        guard isCurrentResult(hit,snapshot:snapshot) else {
+            message="搜索条件已变化，请等待当前结果返回后再操作。"; return false
+        }
+        if action == .copyPath { return true }
+        let currentRoot=roots.first { $0.id == hit.root.id } ?? hit.root
+        guard currentRoot.isOnline else {
+            message="请连接磁盘「\(Self.volumeName(currentRoot))」后再操作此文件。"; return false
+        }
+        guard PreviewResolver.localURL(for:hit) != nil else {
+            message="磁盘在线，但文件已移动、删除、尚未下载或无法读取：\(hit.file.name)。"; return false
+        }
+        return true
+    }
+    func fileOperationURL(for hit: SearchHit, action: FileAction, snapshot: SearchSnapshot? = nil) -> URL? {
+        validateResult(hit,for:action,snapshot:snapshot) ? URL(fileURLWithPath:hit.path) : nil
+    }
+    func performFileAction(_ action: FileAction, hit: SearchHit? = nil, snapshot: SearchSnapshot? = nil,
+                           line: Int? = nil, pasteboard: NSPasteboard = .general) {
+        guard let hit=hit ?? selected, validateResult(hit,for:action,snapshot:snapshot) else { return }
+        let url=URL(fileURLWithPath:hit.path)
+        switch action {
+        case .copyPath:
+            pasteboard.clearContents(); pasteboard.setString(hit.path,forType:.string)
+        case .copyFile:
+            pasteboard.clearContents(); pasteboard.writeObjects([url as NSURL])
+        case .reveal:
+            NSWorkspace.shared.activateFileViewerSelecting([url]); recordOpen(hit.id)
+        case .open, .openAtLine:
+            if hit.file.kind == .code, let line=line ?? (hit.id == selectedID ? previewLine : nil), CodeFileOpener.open(url,line:line) { recordOpen(hit.id); return }
+            if NSWorkspace.shared.open(url) { recordOpen(hit.id) }
+            else { message="未能打开此文件，请检查文件是否仍存在。" }
+        case .quickLook: AppDelegate.shared?.preview(hit:hit,snapshot:snapshot)
+        case .preview: break // URL consumers call fileOperationURL after this same gate.
+        }
+    }
+    func openSelected() { performFileAction(.open) }
+    func revealSelected() { performFileAction(.reveal) }
+    func copySelectedPath() { performFileAction(.copyPath) }
+    func copySelectedFile(to pasteboard:NSPasteboard = .general) { performFileAction(.copyFile,pasteboard:pasteboard) }
     /// Opened results rank higher in later searches (OpenHistory).
     private func recordOpen(_ id:Int64) {
         let engine=nameEngine
         DispatchQueue.global(qos:.utility).async { engine?.recordOpen(id) }
-    }
-    func copySelectedPath() { guard let hit=selected else { return }; NSPasteboard.general.clearContents(); NSPasteboard.general.setString(hit.path,forType:.string) }
-    func copySelectedFile(to pasteboard:NSPasteboard = .general) {
-        guard let hit=selected,let url=PreviewResolver.localURL(for:hit) else {message="请先连接磁盘或将文件下载到本机。";return}
-        pasteboard.clearContents();pasteboard.writeObjects([url as NSURL])
     }
     func moveSelection(_ step:Int) {
         guard !hits.isEmpty else { return }
         let current=hits.firstIndex { $0.id==selectedID } ?? (step>0 ? -1 : hits.count)
         selectedID=hits[min(max(current+step,0),hits.count-1)].id
     }
-    func showMainWindow() { openMain?(); NSApp.activate(ignoringOtherApps:true); NSApp.windows.first(where:{$0.identifier?.rawValue == "main" || $0.title.contains("觅迹")})?.makeKeyAndOrderFront(nil); focusSearch=UUID() }
+    func showMainWindow() { openMain?(); if AppDelegate.isBackgroundUITesting {return}; NSApp.activate(ignoringOtherApps:true); NSApp.windows.first(where:{$0.identifier?.rawValue == "main" || $0.title.contains("觅迹")})?.makeKeyAndOrderFront(nil); focusSearch=UUID() }
 }

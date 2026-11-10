@@ -83,15 +83,16 @@ final class PreviewIntegrationTests: XCTestCase {
     func testSameSelectionKeepsLoadedPreviewAndHideReleasesIt() async throws {
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let oldDir=getenv("MIJI_DATA_DIR").map{String(cString:$0)},oldAuto=getenv("MIJI_NO_AUTOSTART").map{String(cString:$0)}
-        setenv("MIJI_DATA_DIR",directory.path,1);setenv("MIJI_NO_AUTOSTART","1",1)
+        setenv("MIJI_DATA_DIR",directory.appendingPathComponent("store").path,1);setenv("MIJI_NO_AUTOSTART","1",1)
         defer {
             if let oldDir {setenv("MIJI_DATA_DIR",oldDir,1)}else{unsetenv("MIJI_DATA_DIR")}
             if let oldAuto {setenv("MIJI_NO_AUTOSTART",oldAuto,1)}else{unsetenv("MIJI_NO_AUTOSTART")}
             try? FileManager.default.removeItem(at:directory)
         }
-        let db=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
-        let root=IndexedRoot(id:"r",path:directory.path);try db.saveRoot(root)
-        let file=directory.appendingPathComponent("needle.swift")
+        let db=try SearchDatabase(url:directory.appendingPathComponent("store/index.sqlite"))
+        let source=directory.appendingPathComponent("source");try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+        let root=IndexedRoot(id:"r",path:source.path);try db.saveRoot(root)
+        let file=source.appendingPathComponent("needle.swift")
         try Data("first\nneedle\nlast".utf8).write(to:file)
         let signature=try FileSignature.read(file)
         try db.upsertFiles([FileRecord(rootID:"r",relativePath:file.lastPathComponent,name:file.lastPathComponent,fileExtension:"swift",kind:.code,size:signature.size,modified:signature.modified,inode:signature.inode)],generation:1)
@@ -118,7 +119,7 @@ final class PreviewIntegrationTests: XCTestCase {
         model.setSearchVisible(true)
         for _ in 0..<100 where model.previewWarning==nil {try await Task.sleep(nanoseconds:10_000_000)}
         XCTAssertNil(model.previewLine,"旧正文的行号不能用来打开已变化的文件")
-        XCTAssertTrue(model.previewWarning?.contains("文件已变化")==true)
+        XCTAssertTrue(model.previewWarning?.contains("文件已变化")==true,"warning=\(model.previewWarning ?? "nil"), phase=\(model.searchPhase), loading=\(model.previewLoading), text=\(model.previewText), file=\(String(describing:model.selected?.file))")
         model.setSearchVisible(false)
     }
     @MainActor

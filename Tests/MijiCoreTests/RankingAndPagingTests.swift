@@ -2,7 +2,7 @@ import XCTest
 import Foundation
 @testable import MijiCore
 
-/// Full-text pages that stop once filled, and name ranking by match type,
+/// Bounded full-text ranking and name ranking by match type,
 /// location and recent opens.
 final class RankingAndPagingTests: XCTestCase {
     private var directory: URL!
@@ -70,7 +70,7 @@ final class RankingAndPagingTests: XCTestCase {
         }
     }
 
-    func testRelevancePagesListOwnRecentFilesFirstAndStayVerified() throws {
+    func testRelevancePagesRankAllExploredEvidenceAndStayVerified() throws {
         var docs: [Doc] = []
         for i in 0..<60 {
             let folder = ["Users/me/Documents", "Users/me/Library/Caches/app", "Users/me/code/node_modules/pkg", "Users/me/.config", "System/Library"][i % 5]
@@ -79,13 +79,14 @@ final class RankingAndPagingTests: XCTestCase {
         let ids = try add(docs)
         var partials: [[Int64]] = []
         let page = try db.searchSupplementary("target", options: SearchOptions(scope: .content, limit: 20), onPartial: { partials.append($0.map(\.id)) })
-        // The page is the 20 most recently stored verified bodies (here the
-        // last ones added), shown with own files first, newest first.
-        let first = docs.filter { $0.text.contains("target") }.suffix(20)
-        let own = first.filter { $0.path.hasPrefix("Users/me/Documents") }.sorted { $0.modified > $1.modified }
-        let others = first.filter { !$0.path.hasPrefix("Users/me/Documents") }.sorted { $0.modified > $1.modified }
-        XCTAssertEqual(page.map(\.id), (own + others).map { ids[$0.path]! })
-        XCTAssertEqual(page.count, 20, "页面填满即停")
+        // Same focused opening: location and date are secondary, independent of content IDs.
+        let matching = docs.filter { $0.text.contains("target") }.sorted { a, b in
+            let ownA = a.path.hasPrefix("Users/me/Documents"), ownB = b.path.hasPrefix("Users/me/Documents")
+            if ownA != ownB { return ownA }
+            return a.modified > b.modified
+        }.prefix(20)
+        XCTAssertEqual(page.map(\.id), matching.map { ids[$0.path]! })
+        XCTAssertEqual(page.count, 20, "返回上限与探索预算独立")
         XCTAssertTrue(partials.allSatisfy { $0.count <= 20 })
         // The full pass (search) keeps name matches first, then the same body order.
         let all = try db.search("n1", options: SearchOptions(scope: .all, limit: 5)).map(\.id)

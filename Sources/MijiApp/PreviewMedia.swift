@@ -48,15 +48,23 @@ struct FileThumbnail: View {
     let hit: SearchHit
     var pixels = 400
     var showsStatus = false
+    /// Grid cells draw thumbnails like Finder: slightly rounded with a soft page shadow.
+    var decorated = false
     @State private var image: NSImage?
     @State private var loading = true
     var body: some View {
         Group {
-            if let image { Image(nsImage: image).resizable().scaledToFit() }
+            if let image {
+                if decorated {
+                    Image(nsImage: image).resizable().scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                        .shadow(color: .black.opacity(0.22), radius: 2.5, y: 1)
+                } else { Image(nsImage: image).resizable().scaledToFit() }
+            }
             else if showsStatus {
-                if loading { ProgressView("正在载入缩略图…").controlSize(.small).font(.caption) }
-                else { Label("缩略图不可用 · 可使用快速查看", systemImage: "photo").font(.caption).foregroundStyle(.secondary) }
-            } else { Image(systemName: hit.file.kind.symbol).font(.system(size: 38, weight: .light)).foregroundStyle(.secondary) }
+                if loading { VStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在载入缩略图…") }.font(.system(size: 11)).foregroundStyle(.secondary) }
+                else { VStack(spacing: 6) { Image(systemName: "photo").font(.system(size: 26, weight: .light)).foregroundStyle(.tertiary); Text("缩略图不可用").font(.system(size: 12, weight: .medium)); Text("可使用快速查看").font(.system(size: 11)).foregroundStyle(.secondary) } }
+            } else { Image(nsImage: FileIconCache.icon(hit)).resizable().scaledToFit().frame(width: 64, height: 64) }
         }
         .task(id: "\(hit.path)|\(hit.file.modified)|\(hit.file.size)|\(pixels)") {
             image = nil; loading = true
@@ -141,6 +149,7 @@ private final class PreviewPlayback: ObservableObject {
 
 struct MediaFilePreview: View {
     let hit: SearchHit
+    let authorize: () -> URL?
     @StateObject private var playback = PreviewPlayback()
     var body: some View {
         ZStack {
@@ -150,7 +159,7 @@ struct MediaFilePreview: View {
                 if hit.file.kind == .video { FileThumbnail(hit: hit, pixels: 800, showsStatus: true) }
                 else { Image(systemName: "waveform").font(.system(size: 32)).foregroundStyle(.secondary).offset(y: -48) }
                 Button {
-                    if let url = PreviewResolver.localURL(for: hit) { playback.play(url) }
+                    if let url = authorize() { playback.play(url) }
                 } label: { Image(systemName: "play.circle.fill").font(.system(size: 48)).symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.6)) }
                 .buttonStyle(.plain).accessibilityLabel("播放预览")
                 .disabled(!hit.root.isOnline)
@@ -170,8 +179,9 @@ func highlightedPreview(_ text: String, query: String) -> AttributedString {
         for _ in 0..<100 {
             guard start < text.endIndex, let range = text.range(of: term, options: [.caseInsensitive, .diacriticInsensitive], range: start..<text.endIndex),
                   let mapped = Range(range, in: result) else { break }
-            result[mapped].backgroundColor = .yellow.opacity(0.25)
-            result[mapped].foregroundColor = .primary
+            // The system find highlight, as in Notes, Safari and Preview.
+            result[mapped].backgroundColor = Color(nsColor: .findHighlightColor).opacity(0.9)
+            result[mapped].foregroundColor = .black
             start = range.upperBound
         }
     }

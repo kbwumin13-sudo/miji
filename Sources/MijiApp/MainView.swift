@@ -181,7 +181,7 @@ struct MainView: View {
         switch model.searchStatus.phase {
         case .searching, .supplementing: return "正在搜索…"
         case .failed: return "未能完成搜索"
-        case .complete: return "当前条件下没有匹配项"
+        case .complete: return model.searchStatus.isLimited ? "暂未找到匹配项" : "当前条件下没有匹配项"
         case .idle: return "搜索文件与内容"
         }
     }
@@ -190,6 +190,7 @@ struct MainView: View {
         case .searching, .supplementing: return "正在查找文件名与已索引内容"
         case .failed: return model.searchStatus.error ?? "请稍后重试。"
         default:
+            if model.searchStatus.isLimited { return "仅检索了部分内容，可缩小范围" }
             if model.paused { return "索引已暂停，仍可搜索已保存的内容" }
             if model.progress.busy { return "索引仍在\(model.progress.phase)，可搜索已完成的内容" }
             return model.activeFilters.isEmpty ? "试试其他关键词，也可以搜索文档文字与图片内容" : "试试减少筛选条件，或更换关键词"
@@ -217,7 +218,9 @@ struct MainView: View {
         case .searching: return "正在搜索…"
         case .supplementing: return "已找到 \(status.count) 项 · 正文检索中"
         case .failed: return "搜索未完成 · \(status.count) 项"
-        case .complete: return status.count == 500 ? "显示前 500 项" : "共 \(status.count) 项"
+        case .complete:
+            if status.isLimited { return "\(status.count) 项 · 仅检索了部分内容，可缩小范围" }
+            return status.count == 500 ? "显示前 500 项" : "共 \(status.count) 项"
         case .idle: return "准备搜索"
         }
     }

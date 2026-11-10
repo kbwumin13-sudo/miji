@@ -18,12 +18,23 @@ enum MijiEntry {
     }
 }
 private final class SearchPanel:NSPanel {
-    override var canBecomeKey:Bool {true}
-    override var canBecomeMain:Bool {true}
+    override var canBecomeKey:Bool {!AppDelegate.isBackgroundUITesting}
+    override var canBecomeMain:Bool {!AppDelegate.isBackgroundUITesting}
+}
+private final class SearchAuxiliaryWindow:NSWindow {
+    override var canBecomeKey:Bool {!AppDelegate.isBackgroundUITesting && super.canBecomeKey}
+    override var canBecomeMain:Bool {!AppDelegate.isBackgroundUITesting && super.canBecomeMain}
 }
 @MainActor
 final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreviewPanelDataSource {
     static weak var shared:AppDelegate?
+    nonisolated static func usesBackgroundPresentation(environment:[String:String],bundleIdentifier:String?) -> Bool {
+        guard environment["MIJI_UI_TESTING"] == "1",let bundleIdentifier,!bundleIdentifier.isEmpty else{return false}
+        return bundleIdentifier != "com.haiyu.miji"
+    }
+    static var isBackgroundUITesting:Bool {
+        usesBackgroundPresentation(environment:ProcessInfo.processInfo.environment,bundleIdentifier:Bundle.main.bundleIdentifier)
+    }
     let model=AppModel()
     private var searchPanel:NSPanel!
     private var settingsWindow:NSWindow?
@@ -62,7 +73,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         var event=EventTypeSpec(eventClass:OSType(kEventClassKeyboard),eventKind:UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(),{_,_,_ in DispatchQueue.main.async{AppDelegate.shared?.toggleSearch()};return noErr},1,&event,nil,&handler)
         let keyID=EventHotKeyID(signature:OSType(0x4d494a49),id:1)
-        let status:OSStatus = ProcessInfo.processInfo.environment["MIJI_UI_TESTING"] == "1" ? noErr : RegisterEventHotKey(UInt32(kVK_Space),UInt32(controlKey | optionKey),keyID,GetApplicationEventTarget(),0,&hotKey)
+        let status:OSStatus = Self.isBackgroundUITesting ? noErr : RegisterEventHotKey(UInt32(kVK_Space),UInt32(controlKey | optionKey),keyID,GetApplicationEventTarget(),0,&hotKey)
         NSLog("Miji launched; hotkey status %d",status)
         if status != noErr {model.message="全局快捷键 ⌃⌥Space 已被占用。仍可从菜单栏打开觅迹。"}
         monitor=NSEvent.addLocalMonitorForEvents(matching:.keyDown){[weak self] event in
@@ -90,7 +101,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
     /// the same model bindings as the UI and never inject results or search phases.
     private func applyUITestPreset() {
         let env=ProcessInfo.processInfo.environment
-        guard env["MIJI_UI_TESTING"] == "1",Bundle.main.bundleIdentifier != "com.haiyu.miji" else{return}
+        guard Self.isBackgroundUITesting else{return}
         if env["MIJI_UI_PAUSE_INDEX"] == "1" {model.paused=true;model.service?.setPaused(true)}
         if let kind=env["MIJI_UI_KIND"].flatMap(FileKind.init(rawValue:)) {model.kind=kind}
         if let scope=env["MIJI_UI_SCOPE"].flatMap(SearchScope.init(rawValue:)) {model.scope=scope}
@@ -99,6 +110,15 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         if let preview=env["MIJI_UI_PREVIEW"].flatMap(SearchPreviewMode.init(rawValue:)) {model.previewMode=preview}
         model.gridEnabled=env["MIJI_UI_GRID"] == "1"
         if let query=env["MIJI_UI_QUERY"] {model.query=query}
+    }
+    private func present(_ window:NSWindow,activate:Bool = false) {
+        if Self.isBackgroundUITesting {
+            window.ignoresMouseEvents=true
+            window.orderFrontRegardless()
+        } else {
+            if activate {NSApp.activate(ignoringOtherApps:true)}
+            window.makeKeyAndOrderFront(nil)
+        }
     }
     private func resizeSearchPanel() {
         guard let panel=searchPanel else{return}
@@ -110,13 +130,13 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
     }
     func showPDFMatch() {
         guard let hit=model.selected,model.validateResult(hit,for:.preview),let document=model.previewPDF,let page=model.previewPage else{return}
-        let window=NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:700),styleMask:[.titled,.closable,.resizable,.miniaturizable],backing:.buffered,defer:false)
+        let window=SearchAuxiliaryWindow(contentRect:NSRect(x:0,y:0,width:800,height:700),styleMask:[.titled,.closable,.resizable,.miniaturizable],backing:.buffered,defer:false)
         window.title=model.selected?.file.name ?? "PDF 预览"
         window.isReleasedWhenClosed=false
         window.contentView=NSHostingView(rootView:PDFDocumentPreview(document:document,page:page,terms:PreviewResolver.terms(in:model.query)))
         hideSearch()
         pdfWindow?.close();pdfWindow=window
-        window.center();window.makeKeyAndOrderFront(nil)
+        window.center();present(window)
     }
     private func setupMenus() {
         let main=NSMenu();let appItem=NSMenuItem();let appMenu=NSMenu()
@@ -141,7 +161,8 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
             let rect=screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x:rect.midX-panel.frame.width/2,y:rect.maxY-150-panel.frame.height))
         }
-        NSApp.unhide(nil);NSApp.activate(ignoringOtherApps:true);panel.makeKeyAndOrderFront(nil);model.setSearchVisible(true);model.focusSearch=UUID()
+        if !Self.isBackgroundUITesting {NSApp.unhide(nil)}
+        present(panel,activate:true);model.setSearchVisible(true);model.focusSearch=UUID()
         NSLog("Miji search panel id %d visible %d frame %@",panel.windowNumber,panel.isVisible ? 1 : 0,NSStringFromRect(panel.frame))
     }
     private func hideSearch() { searchPanel?.orderOut(nil);model.setSearchVisible(false) }
@@ -149,11 +170,11 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
     @objc func togglePause(){model.togglePause()}
     @objc func openSettings() {
         if settingsWindow==nil {
-            let window=NSWindow(contentRect:NSRect(x:0,y:0,width:720,height:650),styleMask:[.titled,.closable],backing:.buffered,defer:false)
+            let window=SearchAuxiliaryWindow(contentRect:NSRect(x:0,y:0,width:720,height:650),styleMask:[.titled,.closable],backing:.buffered,defer:false)
             window.title="觅迹 · 索引与设置";window.isReleasedWhenClosed=false
             window.contentView=NSHostingView(rootView:SettingsView(model:model));window.center();settingsWindow=window
         }
-        hideSearch();NSApp.activate(ignoringOtherApps:true);settingsWindow?.makeKeyAndOrderFront(nil)
+        hideSearch();if let window=settingsWindow {present(window,activate:true)}
     }
     func closeSettings(){settingsWindow?.orderOut(nil);showSearch()}
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool{false}
@@ -162,13 +183,13 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
         return .terminateLater
     }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows:Bool)->Bool{showSearch();return true}
-    func applicationDidResignActive(_ notification:Notification){if ProcessInfo.processInfo.environment["MIJI_UI_TESTING"] != "1" {hideSearch()}}
+    func applicationDidResignActive(_ notification:Notification){if !Self.isBackgroundUITesting {hideSearch()}}
     func applicationWillTerminate(_ notification:Notification){model.service?.stop();if let hotKey{UnregisterEventHotKey(hotKey)};if let handler{RemoveEventHandler(handler)};if let monitor{NSEvent.removeMonitor(monitor)}}
     func preview(hit:SearchHit? = nil,snapshot:SearchSnapshot? = nil) {
         guard let hit=hit ?? model.selected,let url=model.fileOperationURL(for:hit,action:.quickLook,snapshot:snapshot) else{return}
         previewURL=url as NSURL;previewHit=hit;previewSnapshot=model.displayedSnapshot
         guard let panel=QLPreviewPanel.shared() else{return}
-        panel.dataSource=self;panel.reloadData();panel.level = .floating;panel.makeKeyAndOrderFront(nil)
+        panel.dataSource=self;panel.reloadData();panel.level = .floating;present(panel)
     }
     private var quickLookIsCurrent:Bool {
         guard let hit=previewHit else{return false}

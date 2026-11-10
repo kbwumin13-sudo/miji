@@ -551,5 +551,5 @@ final class AppModel: ObservableObject {
         let current=hits.firstIndex { $0.id==selectedID } ?? (step>0 ? -1 : hits.count)
         selectedID=hits[min(max(current+step,0),hits.count-1)].id
     }
-    func showMainWindow() { openMain?(); NSApp.activate(ignoringOtherApps:true); NSApp.windows.first(where:{$0.identifier?.rawValue == "main" || $0.title.contains("觅迹")})?.makeKeyAndOrderFront(nil); focusSearch=UUID() }
+    func showMainWindow() { openMain?(); if AppDelegate.isBackgroundUITesting {return}; NSApp.activate(ignoringOtherApps:true); NSApp.windows.first(where:{$0.identifier?.rawValue == "main" || $0.title.contains("觅迹")})?.makeKeyAndOrderFront(nil); focusSearch=UUID() }
 }

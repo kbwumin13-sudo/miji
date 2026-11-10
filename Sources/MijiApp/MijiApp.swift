@@ -84,7 +84,21 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
             }
             return nil
         }
-        DispatchQueue.main.async{self.showSearch()}
+        DispatchQueue.main.async{self.applyUITestPreset();self.showSearch()}
+    }
+    /// Deterministic launch state for isolated native-app acceptance. These set
+    /// the same model bindings as the UI and never inject results or search phases.
+    private func applyUITestPreset() {
+        let env=ProcessInfo.processInfo.environment
+        guard env["MIJI_UI_TESTING"] == "1",Bundle.main.bundleIdentifier != "com.haiyu.miji" else{return}
+        if env["MIJI_UI_PAUSE_INDEX"] == "1" {model.paused=true;model.service?.setPaused(true)}
+        if let kind=env["MIJI_UI_KIND"].flatMap(FileKind.init(rawValue:)) {model.kind=kind}
+        if let scope=env["MIJI_UI_SCOPE"].flatMap(SearchScope.init(rawValue:)) {model.scope=scope}
+        if let sort=env["MIJI_UI_SORT"].flatMap(SearchSort.init(rawValue:)) {model.sort=sort}
+        if let root=env["MIJI_UI_ROOT_ID"] {model.rootID=root}
+        if let preview=env["MIJI_UI_PREVIEW"].flatMap(SearchPreviewMode.init(rawValue:)) {model.previewMode=preview}
+        model.gridEnabled=env["MIJI_UI_GRID"] == "1"
+        if let query=env["MIJI_UI_QUERY"] {model.query=query}
     }
     private func resizeSearchPanel() {
         guard let panel=searchPanel else{return}

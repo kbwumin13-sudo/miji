@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.1"><img src="https://img.shields.io/badge/release-v1.3.1-087e65" alt="觅迹 1.3.1"></a>
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2"><img src="https://img.shields.io/badge/release-v1.3.2-087e65" alt="觅迹 1.3.2"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-172f2a?logo=apple&logoColor=white" alt="macOS 14 或更新版本">
   <img src="https://img.shields.io/badge/Apple_Silicon-arm64-172f2a" alt="Apple Silicon arm64">
   <img src="https://img.shields.io/badge/processing-on--device-087e65" alt="识别、索引与查询全部在本机完成">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.1"><b>下载觅迹 ↗</b></a> &nbsp; · &nbsp;
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2"><b>下载觅迹 ↗</b></a> &nbsp; · &nbsp;
   <a href="#快速开始">快速开始</a> &nbsp; · &nbsp;
   <a href="#搜索语法">搜索语法</a> &nbsp; · &nbsp;
   <a href="README.en.md">English</a>
@@ -107,7 +107,7 @@
 
 **Apple Silicon · macOS 14 或更新版本**
 
-1. [下载觅迹 1.3.1](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.1)，解压 `Miji-1.3.1-macOS-arm64.zip`，将「觅迹.app」拖入「应用程序」。
+1. [下载觅迹 1.3.2](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2)，解压 `Miji-1.3.2-macOS-arm64.zip`，将「觅迹.app」拖入「应用程序」。
 2. **首次打开**：应用使用 ad-hoc 签名，尚未经过 Apple 公证。若提示无法验证开发者，先尝试打开一次，再到「系统设置 → 隐私与安全性」点击「仍要打开」。若提示「已损坏」，确认安装包来自本仓库的 Releases 后，在终端执行：
 
    ```sh
@@ -272,4 +272,4 @@ python3 scripts/e2e-check.py --cli .build/release/miji-cli   # 端到端检查
 
 觅迹以 [MIT License](LICENSE) 开源；`Vendor/OilFind` 保留[原 MIT 许可证](Vendor/OilFind/LICENSE)，随应用一同分发。
 
-<p align="center"><b>少翻几个文件夹，多留一点时间给正在做的事。</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.1">下载觅迹 ↗</a></p>
+<p align="center"><b>少翻几个文件夹，多留一点时间给正在做的事。</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2">下载觅迹 ↗</a></p>

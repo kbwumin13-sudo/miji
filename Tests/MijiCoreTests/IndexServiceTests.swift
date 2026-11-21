@@ -1,5 +1,7 @@
 import XCTest
 import AppKit
+import CSQLite
+import Darwin
 @testable import MijiCore
 
 final class IndexServiceTests:XCTestCase {
@@ -347,6 +349,133 @@ final class IndexServiceTests:XCTestCase {
         service.requestIncrementalUpdate()
         eventually({ (try? db.search("newly visible").count)==1 },timeout:5)
         XCTAssertNil(IncrementalIndexState.read(stateURL).roots[root.id]?.deferredRetry)
+    }
+
+    func testInaccessiblePendingFileFailsWithoutRepeatedReconciliation() throws {
+        let (base,folder,db,_)=try incrementalFixture(["locked/image.png","other.txt"])
+        let locked=folder.appendingPathComponent("locked")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:locked.path)
+            try? FileManager.default.removeItem(at:base)
+        }
+        try FileManager.default.setAttributes([.posixPermissions:0],ofItemAtPath:locked.path)
+        var info=stat()
+        let status=lstat(locked.appendingPathComponent("image.png").path,&info)
+        let error=errno
+        guard status == -1, error == EACCES || error == EPERM else {
+            throw XCTSkip("Directory traversal permissions do not apply")
+        }
+        let service=IndexService(database:db,extractor:{url,_ in
+            XCTAssertNotEqual(url.lastPathComponent,"image.png")
+            return ExtractedContent(text:"steady light content")
+        },watchEvents:false)
+        defer {service.stop()}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        eventually({
+            (try? db.search("image.png").first?.file.contentState) == "error" &&
+            (try? db.statistics().indexedContent) == 1
+        },timeout:3)
+        let failed=try XCTUnwrap(db.search("image.png").first?.file)
+        XCTAssertEqual(failed.contentError,NSError(domain:NSPOSIXErrorDomain,code:Int(error)).localizedDescription)
+        XCTAssertEqual(try db.statistics().pending,0)
+        let inbox=IncrementalIndexState.read(db.url.appendingPathExtension("incremental.json"))
+        XCTAssertTrue(inbox.roots.values.allSatisfy{$0.pending.isEmpty && $0.inFlight.isEmpty && $0.deferredRetry == nil})
+    }
+
+    func testMissingPendingFilesStillReconcileTheirCatalogRows() throws {
+        let (base,folder,db,_)=try incrementalFixture(["gone.png","replace/child.png"])
+        defer {try? FileManager.default.removeItem(at:base)}
+        try FileManager.default.removeItem(at:folder.appendingPathComponent("gone.png"))
+        let replaced=folder.appendingPathComponent("replace")
+        try FileManager.default.removeItem(at:replaced)
+        try Data("regular file".utf8).write(to:replaced)
+        let service=IndexService(database:db,extractor:{_,_ in
+            XCTFail("Missing paths should be reconciled before extraction")
+            return ExtractedContent()
+        },watchEvents:false)
+        defer {service.stop()}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        eventually({
+            (try? db.search("gone.png").isEmpty) == true &&
+            (try? db.search("child.png").isEmpty) == true
+        },timeout:5)
+        XCTAssertEqual(try db.statistics().errors,0)
+        XCTAssertEqual(try db.statistics().pending,0)
+    }
+
+    func testUserActivityDoesNotWaitForBodyDatabaseWrite() throws {
+        final class WriteGate {
+            let entered=DispatchSemaphore(value:0)
+            let release=DispatchSemaphore(value:0)
+        }
+        let (base,_,db,_)=try incrementalFixture(["body.txt"])
+        defer {try? FileManager.default.removeItem(at:base)}
+        let gate=WriteGate()
+        sqlite3_update_hook(db.connection,{ pointer,_,_,table,_ in
+            guard let pointer,let table,String(cString:table) == "content_blobs" else {return}
+            let gate=Unmanaged<WriteGate>.fromOpaque(pointer).takeUnretainedValue()
+            gate.entered.signal()
+            _=gate.release.wait(timeout:.now()+8)
+        },Unmanaged.passUnretained(gate).toOpaque())
+        defer {
+            sqlite3_update_hook(db.connection,nil,nil)
+            withExtendedLifetime(gate) {}
+        }
+        let service=IndexService(database:db,extractor:{_,_ in
+            ExtractedContent(text:"publish this content")
+        },watchEvents:false)
+        defer {service.stop();gate.release.signal()}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        XCTAssertEqual(gate.entered.wait(timeout:.now()+5),.success)
+        let userActive=DispatchSemaphore(value:0)
+        DispatchQueue.global().async {
+            service.setUserActive(true)
+            userActive.signal()
+        }
+        XCTAssertEqual(userActive.wait(timeout:.now()+1),.success,
+                       "Keyboard and mouse activity must not wait for a body write")
+        gate.release.signal()
+        eventually({(try? db.statistics().indexedContent) == 1},timeout:3)
+    }
+
+    func testRestoredDirectoryTraversalReconcilesSameScopeNowAFile() throws {
+        let (base,folder,db,root)=try incrementalFixture(["replaced.txt/old.txt"])
+        defer {try? FileManager.default.removeItem(at:base)}
+        try finishFixtureContent(db,root)
+        let scope="replaced.txt"
+        let session=try FileScanner(database:db).session(root:root,relativePath:scope,options:ScanOptions())
+        _=try session.advance(cancelled:{false},maximumItems:1,progress:{_ in})
+        XCTAssertFalse(session.finished)
+        XCTAssertTrue(session.checkpoint.directories.contains(scope))
+
+        let stateURL=db.url.appendingPathExtension("incremental.json")
+        var inbox=IncrementalIndexState.read(stateURL)
+        inbox.roots[root.id]?.inFlight=[scope]
+        inbox.roots[root.id]?.scan=session.checkpoint
+        let encoder=JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let saved=String(decoding:try encoder.encode(inbox),as:UTF8.self)
+        // Simulate the existing 1.3.1 journal, before the traversal marker.
+        let legacy=saved.replacingOccurrences(of:"\"enteredDirectory\":true,",with:"")
+        XCTAssertNotEqual(legacy,saved)
+        try Data(legacy.utf8).write(to:stateURL)
+        let target=folder.appendingPathComponent(scope)
+        try FileManager.default.removeItem(at:target)
+        try Data("replacement body".utf8).write(to:target)
+
+        let service=IndexService(database:db,extractor:{url,_ in
+            ExtractedContent(text:try String(contentsOf:url,encoding:.utf8))
+        },watchEvents:false)
+        defer {service.stop()}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        eventually({(try? db.search("replacement body",options:SearchOptions(scope:.content)).count) == 1},timeout:3)
+        XCTAssertEqual(try db.search(scope).first?.file.kind,.document)
+        XCTAssertTrue(try db.search("old.txt").isEmpty)
+        XCTAssertTrue(IncrementalIndexState.read(stateURL).roots[root.id]?.inFlight.isEmpty == true)
     }
 
     func testLateSuccessAndFailureCannotCommitAfterRootIsDisabled() throws {

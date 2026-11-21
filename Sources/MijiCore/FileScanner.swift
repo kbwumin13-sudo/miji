@@ -76,6 +76,7 @@ struct FileScanCheckpoint: Codable, Equatable {
     var directories: [String] = []
     var currentDirectory: String?
     var started = false
+    var enteredDirectory = false
     var count = 0
     var errors: [String] = []
     var preservingPaths: Set<String> = []
@@ -102,6 +103,8 @@ extension FileScanCheckpoint {
         currentDirectory = try values.decodeIfPresent(String.self, forKey: .currentDirectory)
         started = try values.decode(Bool.self, forKey: .started)
         count = try values.decode(Int.self, forKey: .count)
+        enteredDirectory = try values.decodeIfPresent(Bool.self,forKey:.enteredDirectory)
+            ?? (currentDirectory != nil || !directories.isEmpty || count > 1)
         errors = try values.decode([String].self, forKey: .errors)
         preservingPaths = try values.decode(Set<String>.self, forKey: .preservingPaths)
         reconciledPaths = try values.decodeIfPresent(Set<String>.self, forKey: .reconciledPaths) ?? []
@@ -356,7 +359,16 @@ final class FileScanSession {
             var info=stat()
             if lstat(target.path,&info) == 0 {
                 if checkpoint.scope.isEmpty {checkpoint.directories=[""];queuedDirectories.insert("")}
-                else {autoreleasepool {do {if try visit(target) {queue(target)}} catch {recordFailure(target,error)}}}
+                else {
+                    autoreleasepool {
+                        do {
+                            if try visit(target) {
+                                checkpoint.enteredDirectory=true
+                                queue(target)
+                            }
+                        } catch {recordFailure(target,error)}
+                    }
+                }
             } else if errno != ENOENT && errno != ENOTDIR {recordFailure(target,NSError(domain:NSPOSIXErrorDomain,code:Int(errno)))}
             checkpoint.started=true
         }

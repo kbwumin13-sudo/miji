@@ -390,13 +390,22 @@ public final class IndexService: @unchecked Sendable {
         let opts=options(preferences)
         let saved=locked {state.roots[root.id]?.scan}
         let scanner=FileScanner(database:database,ignoredPaths:ignoredPaths)
+        let live=scanSessions[root.id].flatMap { session -> FileScanSession? in
+            guard !session.finished, session.checkpoint.rootPath == root.path,
+                  session.checkpoint.scope == scope, session.checkpoint.options == opts else {return nil}
+            return session
+        }
+        let previous=live?.checkpoint ?? saved
+        // A resumed directory traversal skips its target row. Start a fresh
+        // generation when the target became a file or went away so we index
+        // its replacement and prune the old directory's rows in one scan.
+        let restart = !scope.isEmpty && previous?.scope == scope
+            && previous?.enteredDirectory == true && exactScope(scope,root:root)
         let session:FileScanSession
-        if let live=scanSessions[root.id], !live.finished,
-           live.checkpoint.rootPath == root.path, live.checkpoint.scope == scope,
-           live.checkpoint.options == opts {session=live}
+        if let live, !restart {session=live}
         else {
             guard let current=try database.indexedRoot(id:root.id) else {return false}
-            session=try scanner.session(root:current,relativePath:scope,options:opts,checkpoint:saved)
+            session=try scanner.session(root:current,relativePath:scope,options:opts,checkpoint:restart ? nil : saved)
             scanSessions[root.id]=session
         }
 
@@ -619,39 +628,53 @@ public final class IndexService: @unchecked Sendable {
         var nanoseconds: Int
     }
 
-    private func stamp(_ url: URL) -> ChangeStamp? {
-        var info=stat()
-        guard lstat(url.path,&info) == 0 else {return nil}
-        return ChangeStamp(device:info.st_dev,inode:info.st_ino,seconds:info.st_ctimespec.tv_sec,nanoseconds:info.st_ctimespec.tv_nsec)
+    private enum FileObservation: Equatable {
+        case present(ChangeStamp)
+        case unavailable(Int32)
     }
 
-    private func extract(_ claim: ContentClaim) -> (ExtractionResult, ChangeStamp?) {
+    private func observe(_ url: URL) -> FileObservation {
+        var info=stat()
+        guard lstat(url.path,&info) == 0 else {return .unavailable(errno)}
+        return .present(ChangeStamp(device:info.st_dev,inode:info.st_ino,seconds:info.st_ctimespec.tv_sec,nanoseconds:info.st_ctimespec.tv_nsec))
+    }
+
+    private func extract(_ claim: ContentClaim) -> (ExtractionResult, FileObservation?) {
         let url=URL(fileURLWithPath:claim.root.path).appendingPathComponent(claim.key.path)
         guard !claimCancelled(claim) else {return (.interrupted,nil)}
-        let before=stamp(url)
+        let before=observe(url)
+        switch before {
+        case .unavailable(ENOENT), .unavailable(ENOTDIR):
+            return (.changed,before)
+        case .unavailable(let code):
+            let error=NSError(domain:NSPOSIXErrorDomain,code:Int(code),userInfo:[NSFilePathErrorKey:url.path])
+            return (.failed(error.localizedDescription),before)
+        case .present:
+            break
+        }
         do {
             guard try FileSignature.read(url).matches(claim.file) else {return (.changed,before)}
             let reuse = Self.isHeavy(claim.file) ? extractionReuse : nil
             let key = reuse == nil ? nil : ExtractionReuse.key(url,file:claim.file,cancelled:{self.claimCancelled(claim)})
             if let key, let raw=reuse?.get(key) {
-                guard stamp(url) == before else {return (.changed,before)}
+                guard observe(url) == before else {return (.changed,before)}
                 return (.done(raw),before)
             }
             guard !claimCancelled(claim) else {return (.interrupted,nil)}
             let content=try extractor(url,{ self.claimCancelled(claim) })
             guard !claimCancelled(claim) else {return (.interrupted,nil)}
-            guard stamp(url) == before, try FileSignature.read(url).matches(claim.file) else {return (.changed,before)}
+            guard observe(url) == before, try FileSignature.read(url).matches(claim.file) else {return (.changed,before)}
             let raw=try JSONEncoder().encode(content)
             if let key, content.warning == nil {reuse?.save(raw,for:key)}
             return (.done(raw),before)
         } catch {
             guard !claimCancelled(claim) else {return (.interrupted,nil)}
-            if stamp(url) != before || stamp(url) == nil {return (.changed,before)}
+            guard observe(url) == before else {return (.changed,before)}
             return (.failed(error.localizedDescription),before)
         }
     }
 
-    private func finishContent(lane: ContentLane, claim: ContentClaim, result: (ExtractionResult, ChangeStamp?)) {
+    private func finishContent(lane: ContentLane, claim: ContentClaim, result: (ExtractionResult, FileObservation?)) {
         defer { claims.removeValue(forKey:lane);wakeWork() }
         guard !claimCancelled(claim) else {return}
         let current=VolumeIdentity.refreshed(claim.root)
@@ -661,24 +684,23 @@ public final class IndexService: @unchecked Sendable {
         }
         let url=URL(fileURLWithPath:current.path).appendingPathComponent(claim.key.path)
         do {
-            var changed=false
+            // Validate the claim briefly, then let this serial writer apply
+            // its conditional transaction. Body packing and FTS must not hold
+            // the lock used by keyboard/mouse activity and cancellation.
+            let changed:Bool
             switch result.0 {
             case .interrupted: return
             case .changed:
                 recheckChangedContent(claim,url:url)
                 return
             case .done(let raw):
-                guard stamp(url) == result.1 else {recheckChangedContent(claim,url:url);return}
-                changed=try locked {
-                    guard canCommit(claim) else {return false}
-                    return try database.completeContent(file:claim.file,raw:raw,requirePending:true)
-                }
+                guard observe(url) == result.1 else {recheckChangedContent(claim,url:url);return}
+                guard !claimCancelled(claim) else {return}
+                changed=try database.completeContent(file:claim.file,raw:raw,requirePending:true)
             case .failed(let message):
-                guard stamp(url) == result.1 else {recheckChangedContent(claim,url:url);return}
-                changed=try locked {
-                    guard canCommit(claim) else {return false}
-                    return try database.failPendingContent(file:claim.file,message:message)
-                }
+                guard observe(url) == result.1 else {recheckChangedContent(claim,url:url);return}
+                guard !claimCancelled(claim) else {return}
+                changed=try database.failPendingContent(file:claim.file,message:message)
             }
             if changed {
                 freshContent.removeValue(forKey:claim.key)

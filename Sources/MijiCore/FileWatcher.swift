@@ -59,7 +59,11 @@ public struct FileChangeEvent: Sendable {
 public final class FileWatcher {
     static var currentEventID: UInt64 { FSEventsGetCurrentEventId() }
     static var droppedEventFlag: UInt32 { UInt32(kFSEventStreamEventFlagUserDropped) }
-    private final class Context { let changed: ([FileChangeEvent]) -> Void; init(_ changed: @escaping ([FileChangeEvent]) -> Void) { self.changed = changed } }
+    private final class Context {
+        let trace = IndexBenchmarkTrace.active
+        let changed: ([FileChangeEvent]) -> Void
+        init(_ changed: @escaping ([FileChangeEvent]) -> Void) { self.changed = changed }
+    }
     private var stream: FSEventStreamRef?
     private let queue = DispatchQueue(label: "local.miji.filesystem", qos: .utility)
     public private(set) var isWatching = false
@@ -76,13 +80,21 @@ public final class FileWatcher {
         var context = FSEventStreamContext(version: 0,info: Unmanaged.passUnretained(box).toOpaque(),retain: { pointer in
             guard let pointer else { return nil }; _ = Unmanaged<Context>.fromOpaque(pointer).retain(); return pointer
         },release: { pointer in if let pointer { Unmanaged<Context>.fromOpaque(pointer).release() } },copyDescription: nil)
+        let latencyMS = IndexBenchmarkTrace.useLegacyEventLatency ? 1000 : 500
         stream = FSEventStreamCreate(nil, { _,context,count,paths,flags,ids in
             guard let context else { return }
+            let box = Unmanaged<Context>.fromOpaque(context).takeUnretainedValue()
+            let receivedAt = box.trace.map { _ in DispatchTime.now().uptimeNanoseconds }
             let changedPaths = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
             let changes=(0..<min(count,changedPaths.count)).map { FileChangeEvent(path:changedPaths[$0],flags:flags[$0],id:ids[$0]) }
-            Unmanaged<Context>.fromOpaque(context).takeUnretainedValue().changed(changes)
-        }, &context, paths as CFArray, since, 1, FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagUseCFTypes))
-        if let stream { FSEventStreamSetDispatchQueue(stream,queue); isWatching=FSEventStreamStart(stream) }
+            if let receivedAt { box.trace?.events(changes, receivedAt: receivedAt) }
+            box.changed(changes)
+        }, &context, paths as CFArray, since, Double(latencyMS)/1000, FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagUseCFTypes))
+        if let stream {
+            FSEventStreamSetDispatchQueue(stream,queue)
+            isWatching=FSEventStreamStart(stream)
+            if isWatching { box.trace?.append(.init(phase:"watching",paths:paths,latency_ms:latencyMS)) }
+        }
     }
     deinit { if let stream { FSEventStreamStop(stream); FSEventStreamInvalidate(stream); FSEventStreamRelease(stream) } }
 }

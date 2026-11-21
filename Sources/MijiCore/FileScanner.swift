@@ -68,7 +68,7 @@ struct ScanVolumePolicy {
 
 /// The stack stores directories, not every file. A restart repeats only the
 /// current directory; completed directories retain their committed generation.
-struct FileScanCheckpoint: Codable {
+struct FileScanCheckpoint: Codable, Equatable {
     var rootPath: String
     var scope: String
     var options: ScanOptions
@@ -79,13 +79,32 @@ struct FileScanCheckpoint: Codable {
     var count = 0
     var errors: [String] = []
     var preservingPaths: Set<String> = []
+    var reconciledPaths: Set<String> = []
 
     func matches(root: IndexedRoot, scope: String, options: ScanOptions) -> Bool {
         rootPath == root.path && self.scope == scope && self.options == options && generation > 0
         && IndexRelativePath.validated(scope)
-        && (directories + [currentDirectory].compactMap {$0} + Array(preservingPaths)).allSatisfy {
+        && (directories + [currentDirectory].compactMap {$0} + Array(preservingPaths) + Array(reconciledPaths)).allSatisfy {
             IndexRelativePath.validated($0) && IndexRelativePath.contains(scope,$0)
         }
+        && !reconciledPaths.contains(scope)
+    }
+}
+
+extension FileScanCheckpoint {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        rootPath = try values.decode(String.self, forKey: .rootPath)
+        scope = try values.decode(String.self, forKey: .scope)
+        options = try values.decode(ScanOptions.self, forKey: .options)
+        generation = try values.decode(Int64.self, forKey: .generation)
+        directories = try values.decode([String].self, forKey: .directories)
+        currentDirectory = try values.decodeIfPresent(String.self, forKey: .currentDirectory)
+        started = try values.decode(Bool.self, forKey: .started)
+        count = try values.decode(Int.self, forKey: .count)
+        errors = try values.decode([String].self, forKey: .errors)
+        preservingPaths = try values.decode(Set<String>.self, forKey: .preservingPaths)
+        reconciledPaths = try values.decodeIfPresent(Set<String>.self, forKey: .reconciledPaths) ?? []
     }
 }
 
@@ -113,6 +132,7 @@ final class FileScanSession {
     private let database: SearchDatabase
     private let pathFilter: IndexPathFilter
     private var root: IndexedRoot
+    private var savedRoot: IndexedRoot?
     private let base: URL
     private let volumePolicy: ScanVolumePolicy
     private var enumerator: FileManager.DirectoryEnumerator?
@@ -121,11 +141,12 @@ final class FileScanSession {
     /// iCloud state of queued directories, so each is asked once per session.
     private var directoryUbiquity: [String: Bool] = [:]
     private var batch: [FileRecord] = []
-    private let keys: Set<URLResourceKey> = [.isDirectoryKey,.isSymbolicLinkKey,.isRegularFileKey,.isUbiquitousItemKey,.ubiquitousItemDownloadingStatusKey,.isPackageKey,.volumeUUIDStringKey]
+    private let keys: Set<URLResourceKey>
     // Prefetching the iCloud keys runs File Provider heuristics on every entry
     // (~150 us each, most of a scan). Outside a cloud folder they are asked
     // only for directories, which can be provider roots, and for placeholders.
     private static let ubiquityKeys: Set<URLResourceKey> = [.isUbiquitousItemKey,.ubiquitousItemDownloadingStatusKey]
+    private static let directStatEnabled = ProcessInfo.processInfo.environment["MIJI_DISABLE_DIRECT_STAT"] != "1"
     private struct DirectoryContext {
         let relative: String, absolute: String
         /// The directory is canonical, so a child's relative path, filter path
@@ -134,19 +155,47 @@ final class FileScanSession {
         let filterPath: String?
         let hiddenAncestor: Bool, cacheAncestor: Bool
         let ubiquitous: Bool
+        let statRegularFiles: Bool
         let keys: Set<URLResourceKey>
     }
     private let excluded: Set<String> = ["node_modules",".git",".svn",".build",".venv","venv","__pycache__","DerivedData","Pods","Carthage",".Trash",".Trashes",".Spotlight-V100",".fseventsd"]
     private let userLibrary=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library").path
     private(set) var checkpoint: FileScanCheckpoint
     private(set) var finished = false
+    private(set) var contentEligibilityRevision: UInt64 = 0
 
     init(database: SearchDatabase, ignoredPaths: [String], root: IndexedRoot, scope: String, options: ScanOptions, checkpoint: FileScanCheckpoint?) {
         self.database=database; self.pathFilter=IndexPathFilter(ignoredPaths:ignoredPaths)
         self.root=root; self.base=URL(fileURLWithPath:root.path); self.volumePolicy=ScanVolumePolicy(root:root)
+        var keys: Set<URLResourceKey> = [.isDirectoryKey,.isSymbolicLinkKey,.isRegularFileKey,.isUbiquitousItemKey,.ubiquitousItemDownloadingStatusKey,.isPackageKey,.volumeUUIDStringKey]
+        if !options.includeHidden { keys.insert(.isHiddenKey) }
+        self.keys = keys
         if let checkpoint,checkpoint.matches(root:root,scope:scope,options:options) {self.checkpoint=checkpoint}
         else {self.checkpoint=FileScanCheckpoint(rootPath:root.path,scope:scope,options:options,generation:Int64(Date().timeIntervalSince1970*1_000_000))}
         queuedDirectories=Set(self.checkpoint.directories)
+    }
+    /// Protect an independently reconciled scope before its scan can commit.
+    /// A later advance must skip both the scope and any queued descendants.
+    func preserveReconciledScope(_ relativePath: String) {
+        guard !finished, IndexRelativePath.validated(relativePath) else { return }
+        let path = IndexRelativePath.packageScope(relativePath)
+        guard path != checkpoint.scope, IndexRelativePath.contains(checkpoint.scope, path),
+              checkpoint.reconciledPaths.insert(path).inserted else { return }
+        batch.removeAll { IndexRelativePath.contains(path, $0.relativePath) }
+        if let directory = checkpoint.currentDirectory, IndexRelativePath.contains(path, directory) {
+            enumerator = nil
+            context = nil
+            checkpoint.currentDirectory = nil
+        }
+    }
+    private func isReconciled(_ path: String) -> Bool {
+        guard !checkpoint.reconciledPaths.isEmpty else { return false }
+        var ancestor = path
+        while !ancestor.isEmpty {
+            if checkpoint.reconciledPaths.contains(ancestor) { return true }
+            ancestor = (ancestor as NSString).deletingLastPathComponent
+        }
+        return false
     }
     private func relative(_ url: URL) -> String? {
         let path=url.standardizedFileURL.path, prefix=root.path == "/" ? "/" : root.path+"/"
@@ -172,17 +221,23 @@ final class FileScanSession {
         // valid relative path. Ignore them as the original traversal did;
         // treating one as a read failure would preserve/requeue the whole root.
         guard let relative=relative(url),!relative.isEmpty else {return false}
-        if excludedPath(url,relative:relative) {return false}
+        if isReconciled(relative) || excludedPath(url,relative:relative) {return false}
         let v=try url.resourceValues(forKeys:keys)
+        if !checkpoint.options.includeHidden && v.isHidden == true {return false}
         if v.isSymbolicLink == true {return false}
         if v.isDirectory == true,volumePolicy.skipsDirectory(path:url.path,volumeUUID:v.volumeUUIDString) {return false}
-        let kind=FileKind.classify(extension:url.pathExtension,isDirectory:v.isDirectory == true)
-        let content=kind == .image || kind == .document || kind == .code
-        let available=v.isUbiquitousItem != true || v.ubiquitousItemDownloadingStatus == .current || v.ubiquitousItemDownloadingStatus == .downloaded
         let signature=try FileSignature.read(url)
-        batch.append(FileRecord(rootID:root.id,relativePath:relative,name:url.lastPathComponent,fileExtension:url.pathExtension.lowercased(),kind:kind,size:signature.size,modified:signature.modified,inode:signature.inode,contentState:content ? (available ? "pending" : "deferred") : "skipped",contentError:available ? nil : "文件尚未下载到本机"))
-        checkpoint.count += 1
+        let ext = url.pathExtension
+        let kind = FileKind.classify(extension: ext, isDirectory: v.isDirectory == true)
+        appendRecord(relative: relative, name: url.lastPathComponent, ext: ext, kind: kind,
+                     signature: signature, available: Self.available(v))
         return v.isDirectory == true && v.isPackage != true
+    }
+    private func appendRecord(relative: String, name: String, ext: String, kind: FileKind,
+                              signature: FileSignature, available: Bool) {
+        let content = kind == .image || kind == .document || kind == .code
+        batch.append(FileRecord(rootID:root.id,relativePath:relative,name:name,fileExtension:ext.lowercased(),kind:kind,size:signature.size,modified:signature.modified,inode:signature.inode,contentState:content ? (available ? "pending" : "deferred") : "skipped",contentError:available ? nil : "文件尚未下载到本机"))
+        checkpoint.count += 1
     }
     private static func available(_ v: URLResourceValues) -> Bool {
         v.isUbiquitousItem != true || v.ubiquitousItemDownloadingStatus == .current || v.ubiquitousItemDownloadingStatus == .downloaded
@@ -196,12 +251,17 @@ final class FileScanSession {
         let rewritten=["/private","/var/automount"].contains { absolute == $0 || absolute.hasPrefix($0+"/") }
         let direct=absolute != "/" && !rewritten && URL(fileURLWithPath:absolute).standardizedFileURL.resolvingSymlinksInPath().path == absolute
         let parts=directory.split(separator:"/").map(String.init)
-        let ubiquitous=directoryUbiquity.removeValue(forKey:directory)
-            ?? ((try? url.resourceValues(forKeys:[.isUbiquitousItemKey]))?.isUbiquitousItem == true)
+        let isUbiquitous = directoryUbiquity.removeValue(forKey: directory)
+            ?? (try? url.resourceValues(forKeys: [.isUbiquitousItemKey])).map { $0.isUbiquitousItem == true }
+        let ubiquitous = isUbiquitous == true
+        let statRegularFiles = Self.directStatEnabled && direct && !root.isExternal
+            && checkpoint.options.includeHidden && isUbiquitous == false
+            && (try? url.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) == true
         return DirectoryContext(relative:directory,absolute:absolute,direct:direct,
                                 filterPath:direct && !pathFilter.isEmpty ? IndexPathFilter.canonicalPath(absolute) : nil,
                                 hiddenAncestor:parts.contains {$0.hasPrefix(".")},cacheAncestor:parts.contains(where:excluded.contains),
-                                ubiquitous:ubiquitous,keys:ubiquitous ? keys : keys.subtracting(Self.ubiquityKeys))
+                                ubiquitous:ubiquitous,statRegularFiles:statRegularFiles,
+                                keys:ubiquitous ? keys : keys.subtracting(Self.ubiquityKeys))
     }
     /// visit() for a child of a direct directory: the same record and result,
     /// with its paths joined instead of standardized, canonicalized and
@@ -215,22 +275,33 @@ final class FileScanSession {
         // representation (HFS+ decomposition); the URL's own name is as stored.
         let stored=name.utf8.allSatisfy {$0 < 128} ? name : String(cString:(name as NSString).fileSystemRepresentation)
         let relative=context.relative.isEmpty ? stored : context.relative+"/"+stored
+        if checkpoint.reconciledPaths.contains(relative) {return nil}
         let absolute=context.absolute+"/"+name
         if let filterPath=context.filterPath,pathFilter.ignores(canonical:(filterPath == "/" ? "" : filterPath)+"/"+stored) {return nil}
         if !checkpoint.options.includeHidden && (context.hiddenAncestor || name.hasPrefix(".")) {return nil}
         if checkpoint.options.excludeDevelopmentCaches && (context.cacheAncestor || excluded.contains(name) || absolute == userLibrary || absolute.hasPrefix(userLibrary+"/")) {return nil}
+        // lstat already provides the signature and type. Plain local files
+        // outside cloud directories need no Foundation resource lookup.
+        let metadata = context.statRegularFiles ? try FileSignature.metadata(path: absolute) : nil
+        if let metadata, metadata.isRegular, metadata.flags & UInt32(SF_DATALESS) == 0 {
+            let ext = url.pathExtension
+            appendRecord(relative: relative, name: name, ext: ext, kind: FileKind.classify(extension: ext),
+                         signature: metadata.signature, available: true)
+            return nil
+        }
         let v=try url.resourceValues(forKeys:context.keys)
+        if !checkpoint.options.includeHidden && v.isHidden == true {return nil}
         if v.isSymbolicLink == true {return nil}
         let isDirectory=v.isDirectory == true
         if isDirectory,volumePolicy.skipsDirectory(path:absolute,volumeUUID:v.volumeUUIDString) {return nil}
-        let kind=FileKind.classify(extension:url.pathExtension,isDirectory:isDirectory)
-        let content=kind == .image || kind == .document || kind == .code
+        let ext = url.pathExtension
+        let kind=FileKind.classify(extension:ext,isDirectory:isDirectory)
         let signature:FileSignature,flags:UInt32
         if isDirectory && kind == .document {
             // Document packages hash their children, as FileSignature.read does.
             signature=try FileSignature.read(url);flags=0
         } else {
-            let entry=try FileSignature.metadata(path:absolute)
+            let entry=try metadata ?? FileSignature.metadata(path:absolute)
             signature=entry.signature;flags=entry.flags
         }
         let available:Bool,cloud:Bool
@@ -240,8 +311,7 @@ final class FileScanSession {
             let values=try url.resourceValues(forKeys:Self.ubiquityKeys)
             available=Self.available(values);cloud=values.isUbiquitousItem == true
         } else {available=true;cloud=false}
-        batch.append(FileRecord(rootID:root.id,relativePath:relative,name:url.lastPathComponent,fileExtension:url.pathExtension.lowercased(),kind:kind,size:signature.size,modified:signature.modified,inode:signature.inode,contentState:content ? (available ? "pending" : "deferred") : "skipped",contentError:available ? nil : "文件尚未下载到本机"))
-        checkpoint.count += 1
+        appendRecord(relative: relative, name: name, ext: ext, kind: kind, signature: signature, available: available)
         guard isDirectory && v.isPackage != true else {return nil}
         directoryUbiquity[relative]=cloud
         return relative
@@ -256,19 +326,33 @@ final class FileScanSession {
     }
     private func flush(_ progress: (Int)->Void) throws {
         if !batch.isEmpty {
-            try database.upsertFiles(batch,generation:checkpoint.generation)
+            let changed = try IndexBenchmarkTrace.scanCommit(database:database,root:root,scope:checkpoint.scope,upserts:batch) {
+                try database.upsertTrackingPending(batch, generation:checkpoint.generation)
+            }
+            if changed {
+                contentEligibilityRevision &+= 1
+            }
             batch.removeAll(keepingCapacity:true)
         }
         progress(checkpoint.count)
     }
-    func advance(cancelled: ()->Bool, progress: (Int)->Void) throws -> ScanResult {
-        root=VolumeIdentity.refreshed(root)
+    private func saveRootIfChanged() throws {
+        guard root != savedRoot else { return }
         try database.saveRoot(root)
+        savedRoot = root
+    }
+    /// Each entry inspected consumes one item, even if it is ultimately skipped.
+    func advance(cancelled: () -> Bool, shouldYield: () -> Bool = { false },
+                 maximumItems: Int = .max, progress: (Int) -> Void) throws -> ScanResult {
+        root=VolumeIdentity.refreshed(root)
+        try saveRootIfChanged()
         guard root.enabled,root.isOnline,root.path == checkpoint.rootPath else {
             return ScanResult(count:checkpoint.count,complete:false,errors:["索引位置未连接或已停用"])
         }
-        if !checkpoint.started && !cancelled() {
+        var visited = 0
+        if !checkpoint.started && maximumItems > 0 && !cancelled() && !shouldYield() {
             let target=checkpoint.scope.isEmpty ? base : base.appendingPathComponent(checkpoint.scope)
+            if !checkpoint.scope.isEmpty { visited += 1 }
             var info=stat()
             if lstat(target.path,&info) == 0 {
                 if checkpoint.scope.isEmpty {checkpoint.directories=[""];queuedDirectories.insert("")}
@@ -276,7 +360,7 @@ final class FileScanSession {
             } else if errno != ENOENT && errno != ENOTDIR {recordFailure(target,NSError(domain:NSPOSIXErrorDomain,code:Int(errno)))}
             checkpoint.started=true
         }
-        while !cancelled() {
+        while visited < maximumItems && !cancelled() && !shouldYield() {
             if checkpoint.currentDirectory == nil {
                 checkpoint.currentDirectory=checkpoint.directories.popLast()
                 if let path=checkpoint.currentDirectory {queuedDirectories.remove(path)}
@@ -284,6 +368,11 @@ final class FileScanSession {
             guard let directory=checkpoint.currentDirectory else {break}
             try autoreleasepool {
                 if enumerator == nil {
+                    if isReconciled(directory) {
+                        directoryUbiquity.removeValue(forKey: directory)
+                        checkpoint.currentDirectory = nil
+                        return
+                    }
                     let url=directory.isEmpty ? base : base.appendingPathComponent(directory)
                     // Do not follow a directory that became a symlink while we
                     // were suspended. A missing directory is reconciled at end.
@@ -293,14 +382,15 @@ final class FileScanSession {
                         checkpoint.currentDirectory=nil;return
                     }
                     guard (info.st_mode & S_IFMT) == S_IFDIR else {checkpoint.currentDirectory=nil;return}
-                    var options: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants,.skipsPackageDescendants]
-                    if !checkpoint.options.includeHidden {options.insert(.skipsHiddenFiles)}
+                    let options: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants,.skipsPackageDescendants]
                     let context=directoryContext(directory,url:url)
-                    enumerator=FileManager.default.enumerator(at:url,includingPropertiesForKeys:Array(context.keys),options:options,errorHandler:{[weak self] url,error in self?.recordFailure(url,error);return true})
+                    let prefetch = context.statRegularFiles ? [] : Array(context.keys)
+                    enumerator=FileManager.default.enumerator(at:url,includingPropertiesForKeys:prefetch,options:options,errorHandler:{[weak self] url,error in self?.recordFailure(url,error);return true})
                     if enumerator == nil {recordFailure(url,CocoaError(.fileReadNoPermission));checkpoint.currentDirectory=nil;return}
                     self.context=context
                 }
                 guard let url=enumerator?.nextObject() as? URL else {enumerator=nil;context=nil;checkpoint.currentDirectory=nil;return}
+                visited += 1
                 if let context,context.direct {
                     do {if let path=try visitDirect(url,in:context) {queue(path)}} catch {recordFailure(url,error)}
                 } else {
@@ -311,18 +401,25 @@ final class FileScanSession {
         }
         try autoreleasepool {try flush(progress)}
         root=VolumeIdentity.refreshed(root)
-        let reachedEnd=checkpoint.started && checkpoint.currentDirectory == nil && checkpoint.directories.isEmpty && !cancelled() && root.isOnline
+        let reachedEnd = checkpoint.started && checkpoint.currentDirectory == nil && checkpoint.directories.isEmpty
+            && !cancelled() && !shouldYield() && root.enabled && root.isOnline && root.path == checkpoint.rootPath
         if reachedEnd {
-            if checkpoint.scope.isEmpty {
-                try database.finishScan(rootID:root.id,generation:checkpoint.generation,preservingPaths:Array(checkpoint.preservingPaths))
-                if checkpoint.errors.isEmpty {root.lastScan=Date()}
-            } else {
-                try database.finishIncrementalScan(rootID:root.id,relativePath:checkpoint.scope,generation:checkpoint.generation,preservingPaths:Array(checkpoint.preservingPaths))
+            let protected = Array(checkpoint.preservingPaths.union(checkpoint.reconciledPaths))
+            try IndexBenchmarkTrace.scanCommit(database:database,root:root,scope:checkpoint.scope) {
+                if checkpoint.scope.isEmpty {
+                    try database.finishScan(rootID:root.id,generation:checkpoint.generation,preservingPaths:protected)
+                    if checkpoint.errors.isEmpty {root.lastScan=Date()}
+                } else {
+                    try database.finishIncrementalScan(rootID:root.id,relativePath:checkpoint.scope,generation:checkpoint.generation,preservingPaths:protected)
+                }
             }
             finished=true
         }
         root.lastError=checkpoint.errors.isEmpty ? nil : checkpoint.errors.joined(separator:"\n")
-        try database.saveRoot(root)
+        try saveRootIfChanged()
+        if finished {
+            IndexBenchmarkTrace.active?.scanFinished(database:database,root:root,scope:checkpoint.scope,complete:checkpoint.errors.isEmpty)
+        }
         return ScanResult(count:checkpoint.count,complete:finished && checkpoint.errors.isEmpty,errors:checkpoint.errors,preservingPaths:Array(checkpoint.preservingPaths))
     }
 }

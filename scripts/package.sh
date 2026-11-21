@@ -12,6 +12,13 @@ mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$binary_dir/Miji" "$app_path/Contents/MacOS/Miji"
 cp "$binary_dir/miji-cli" "$app_path/Contents/MacOS/miji-extract"
 cp resources/Info.plist "$app_path/Contents/Info.plist"
+if [[ -n "${MIJI_SOURCE_SHA:-}" ]]; then
+    if [[ ! "$MIJI_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+        printf '%s\n' 'MIJI_SOURCE_SHA must be a full commit SHA' >&2
+        exit 1
+    fi
+    /usr/libexec/PlistBuddy -c "Add :MijiSourceCommit string $MIJI_SOURCE_SHA" "$app_path/Contents/Info.plist"
+fi
 mkdir -p "$app_path/Contents/Resources/Licenses"
 cp Vendor/OilFind/LICENSE "$app_path/Contents/Resources/Licenses/OilFind-MIT.txt"
 icon_dir="$(mktemp -d "${TMPDIR:-/tmp}/miji-icon.XXXXXX")"

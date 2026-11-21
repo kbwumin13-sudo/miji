@@ -94,13 +94,15 @@ enum IndexRelativePath {
 /// A durable inbox: advancing an event cursor and recording its paths is one
 /// atomic write. Paths remain here until a complete scan commits. A crash during
 /// enumeration therefore replays work without losing deletions or new files.
-struct IncrementalIndexState: Codable {
-    struct Root: Codable {
+struct IncrementalIndexState: Codable, Equatable {
+    struct Root: Codable, Equatable {
         var path: String
         var cursor: UInt64
         var pending: [String]
         var inFlight: [String] = []
         var scan: FileScanCheckpoint? = nil
+        var interleaved: String? = nil
+        var deferredRetry: [String]? = nil
     }
     var roots: [String:Root] = [:]
     static func read(_ url: URL) -> IncrementalIndexState {

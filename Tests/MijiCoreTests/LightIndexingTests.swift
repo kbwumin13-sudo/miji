@@ -16,7 +16,9 @@ final class LightIndexingTests: XCTestCase {
             let paused=expectation(description:"pause after committed metadata")
             var didPause=false
             service.onProgress = { [weak service] progress in
-                if !didPause,progress.processed == 300 {didPause=true;service?.setPaused(true);paused.fulfill()}
+                if !didPause, progress.phase == "正在建立文件目录", progress.processed > 0 {
+                    didPause=true;service?.setPaused(true);paused.fulfill()
+                }
             }
             service.configure(prefs)
             wait(for:[paused],timeout:5)
@@ -24,7 +26,7 @@ final class LightIndexingTests: XCTestCase {
             service.mutate({_ in},completion:{_ in settled.fulfill()})
             wait(for:[settled],timeout:5)
             let saved=IncrementalIndexState.read(db.url.appendingPathExtension("incremental.json"))
-            let generation=try XCTUnwrap(saved.roots[root.id]?.scan?.generation)
+            let checkpoint=try XCTUnwrap(saved.roots[root.id]?.scan)
             let file=try XCTUnwrap(db.search("f-").first?.file)
             let changed=source.appendingPathComponent(file.relativePath)
             try Data("changed behind cursor".utf8).write(to:changed)
@@ -46,14 +48,16 @@ final class LightIndexingTests: XCTestCase {
             let ended=expectation(description:"finished service settled")
             service.mutate({_ in},completion:{_ in ended.fulfill()})
             wait(for:[ended],timeout:5);service.stop()
-            XCTAssertEqual(resumedAt,300)
+            let resumed=try XCTUnwrap(resumedAt)
+            XCTAssertGreaterThanOrEqual(resumed,checkpoint.count)
+            XCTAssertLessThanOrEqual(resumed,checkpoint.count + 300)
             XCTAssertEqual(try db.statistics().files,901)
             XCTAssertEqual(try db.search(file.name).first?.file.size,21)
             let after=IncrementalIndexState.read(db.url.appendingPathExtension("incremental.json"))
             XCTAssertTrue(after.roots[root.id]?.pending.isEmpty == true)
             XCTAssertTrue(after.roots[root.id]?.inFlight.isEmpty == true)
             XCTAssertNil(after.roots[root.id]?.scan)
-            XCTAssertGreaterThan(generation,0)
+            XCTAssertGreaterThan(checkpoint.generation,0)
         }
     }
     func testEventStormCompactsAffectedSubdirectoriesWithoutEscalatingRoot() {

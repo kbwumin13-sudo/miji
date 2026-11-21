@@ -52,7 +52,7 @@ enum FileAction { case open, reveal, copyFile, copyPath, quickLook, preview, ope
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var query = "" { didSet { scheduleSearch() } }
+    @Published var query = "" { didSet { if query != oldValue { scheduleSearch() } } }
     @Published var hits: [SearchHit] = []
     @Published var selectedID: Int64? { didSet { loadPreview() } }
     @Published var roots: [IndexedRoot] = []
@@ -60,10 +60,10 @@ final class AppModel: ObservableObject {
     @Published var progress = IndexProgress()
     @Published var lastProgressAt: Date?
     @Published var preferences = IndexingPreferences()
-    @Published var kind: FileKind? { didSet { scheduleSearch() } }
-    @Published var rootID: String? { didSet { scheduleSearch() } }
-    @Published var scope = SearchScope.all { didSet { scheduleSearch() } }
-    @Published var sort = SearchSort.relevance { didSet { scheduleSearch() } }
+    @Published var kind: FileKind? { didSet { if kind != oldValue { scheduleSearch() } } }
+    @Published var rootID: String? { didSet { if rootID != oldValue { scheduleSearch() } } }
+    @Published var scope = SearchScope.all { didSet { if scope != oldValue { scheduleSearch() } } }
+    @Published var sort = SearchSort.relevance { didSet { if sort != oldValue { scheduleSearch() } } }
     @Published var paused = false
     @Published private(set) var currentSnapshot: SearchSnapshot?
     @Published private(set) var displayedSnapshot: SearchSnapshot?
@@ -105,13 +105,16 @@ final class AppModel: ObservableObject {
     private let previewQueue = DispatchQueue(label:"local.miji.preview",qos:.utility)
     private var previewTicket: SearchTicket?
     private var previewKey: String?
-    private var previewQuery = ""
+    private var previewContentIdentity: Data?
+    private var previewNeedsContentCheck = false
     private var activityWork: DispatchWorkItem?
     let service: IndexService?
     private let searchQueue = DispatchQueue(label:"local.miji.search",qos:.userInitiated)
     private let statusQueue = DispatchQueue(label:"local.miji.status",qos:.utility)
     private var searchWork: DispatchWorkItem?
     private var refreshWork: DispatchWorkItem?
+    private var indexRefreshWork: DispatchWorkItem?
+    private var pendingCatalogChanges: [String: IndexChange] = [:]
     private var searchToken = UUID()
     private var searchTicket: SearchTicket?
     private let lifetimeTicket=SearchTicket()
@@ -119,6 +122,8 @@ final class AppModel: ObservableObject {
     private var refreshInFlight = false
     private var refreshAgain = false
     private var searchNeedsRefresh = false
+    private var searchNeedsCatalogRefresh = false
+    private var committedContentResults: [SearchHit] = []
     private let searchExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])?
     private let testContentDelay: TimeInterval
     private let supplementaryExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])?
@@ -186,21 +191,10 @@ final class AppModel: ObservableObject {
             }
         }
         service?.onIndexChange = { [weak self] change in
-            DispatchQueue.main.async {
-                guard let self,!self.lifetimeTicket.isCancelled,let engine=self.nameEngine else { return }
-                let lifetime=self.lifetimeTicket
-                self.searchQueue.async { [weak self] in
-                    guard !lifetime.isCancelled else {return}
-                    do {
-                        try engine.refresh(rootID:change.rootID,relativePaths:change.relativePaths,fullRescan:change.fullRescan,cancelled:{lifetime.isCancelled})
-                    }
-                    catch {
-                        guard !lifetime.isCancelled else {return}
-                        do { try engine.load(cancelled:{lifetime.isCancelled}); Self.completeUpgrade(engine,lifetime:lifetime) }
-                        catch { if !lifetime.isCancelled {DispatchQueue.main.async { self?.message=error.localizedDescription }} }
-                    }
-                }
-            }
+            DispatchQueue.main.async { self?.recordCatalogChange(change) }
+        }
+        service?.onContentChange = { [weak self] in
+            DispatchQueue.main.async { self?.scheduleIndexRefresh() }
         }
         refresh()
         if env["MIJI_NO_AUTOSTART"] != "1" { service?.configure(preferences); service?.start() }
@@ -211,7 +205,7 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos:.utility).async { try? engine.completeUpgrade(cancelled:{lifetime.isCancelled}) }
     }
     func prepareForTermination(completion:@escaping ()->Void) {
-        lifetimeTicket.cancel();searchTicket?.cancel();previewTicket?.cancel();searchWork?.cancel();refreshWork?.cancel();activityWork?.cancel()
+        lifetimeTicket.cancel();searchTicket?.cancel();previewTicket?.cancel();searchWork?.cancel();refreshWork?.cancel();indexRefreshWork?.cancel();activityWork?.cancel()
         service?.stop()
         let engine=nameEngine
         searchQueue.async {
@@ -234,13 +228,10 @@ final class AppModel: ObservableObject {
             do {
                 let roots=try database.roots(); let stats=try database.statistics()
                 DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.roots=roots; self.statistics=stats
+                    guard let self,!self.lifetimeTicket.isCancelled else { return }
+                    if self.roots != roots { self.roots=roots }
+                    self.statistics=stats
                     self.finishRefresh()
-                    if self.searchVisible && !self.query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
-                        if self.searching || self.searchWork != nil { self.searchNeedsRefresh=true }
-                        else { self.scheduleSearch() }
-                    }
                 }
             } catch { DispatchQueue.main.async { self?.message=error.localizedDescription; self?.finishRefresh() } }
         }
@@ -249,50 +240,117 @@ final class AppModel: ObservableObject {
         refreshInFlight=false
         if refreshAgain { refreshAgain=false; scheduleRefresh() }
     }
+    private var canSearch: Bool {
+        searchVisible && !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty
+    }
+    private func recordCatalogChange(_ change:IndexChange) {
+        if let previous=pendingCatalogChanges[change.rootID],!change.fullRescan {
+            if !previous.fullRescan {
+                let paths=Array(Set(previous.relativePaths+change.relativePaths))
+                pendingCatalogChanges[change.rootID]=IndexChange(rootID:change.rootID,relativePaths:paths,fullRescan:false)
+            }
+        } else { pendingCatalogChanges[change.rootID]=change }
+        scheduleIndexRefresh()
+    }
+    private func scheduleIndexRefresh() {
+        guard !lifetimeTicket.isCancelled,indexRefreshWork == nil,canSearch || !pendingCatalogChanges.isEmpty else { return }
+        // A fixed window also makes progress when commits keep arriving.
+        let item=DispatchWorkItem { [weak self] in self?.applyIndexChanges() }
+        indexRefreshWork=item
+        DispatchQueue.main.asyncAfter(deadline:.now()+0.25,execute:item)
+    }
+    private func applyIndexChanges() {
+        indexRefreshWork=nil
+        let changes=pendingCatalogChanges
+        pendingCatalogChanges=[:]
+        if !changes.isEmpty,let engine=nameEngine,searchExecutor == nil {
+            let lifetime=lifetimeTicket
+            searchQueue.async { [weak self] in
+                do {
+                    for change in changes.values {
+                        try engine.refresh(rootID:change.rootID,relativePaths:change.relativePaths,fullRescan:change.fullRescan,cancelled:{lifetime.isCancelled})
+                    }
+                } catch {
+                    guard !lifetime.isCancelled else {return}
+                    do { try engine.load(cancelled:{lifetime.isCancelled}); Self.completeUpgrade(engine,lifetime:lifetime) }
+                    catch { if !lifetime.isCancelled {DispatchQueue.main.async { self?.message=error.localizedDescription }} }
+                }
+            }
+        }
+        searchNeedsRefresh=canSearch
+        searchNeedsCatalogRefresh=searchNeedsCatalogRefresh || !changes.isEmpty
+        searchIndexChangesIfReady()
+    }
+    private func searchIndexChangesIfReady() {
+        guard searchNeedsRefresh,canSearch,searchTicket == nil else { return }
+        searchNeedsRefresh=false
+        let preservePresentation=searchPhase == .complete && displayedSnapshot == currentSnapshot
+        if !preservePresentation { beginSearchPresentation() }
+        let publishNames=preservePresentation && searchNeedsCatalogRefresh && scope == .all
+        searchNeedsCatalogRefresh=false
+        startSearch(preservePresentation:preservePresentation,publishNames:publishNames,delay:0)
+    }
     func setSearchVisible(_ visible:Bool) {
+        guard searchVisible != visible else { return }
         searchVisible=visible
         searchPresented=visible
-        loadPreview()
         if !visible { PreviewThumbnails.clear() }
         scheduleSearch()
         if visible { scheduleRefresh() }
     }
-    func scheduleSearch() {
-        if previewQuery != query {previewTicket?.cancel();previewKey=nil}
-        searchWork?.cancel(); searchWork=nil; searchTicket?.cancel(); searching=false; searchNeedsRefresh=false
-        activityWork?.cancel()
-        let token=UUID(); searchToken=token
+    private func scheduleSearch() {
+        searchWork?.cancel(); searchWork=nil
+        searchTicket?.cancel(); searchTicket=nil
+        searchNeedsRefresh=false
+        searchNeedsCatalogRefresh=false
+        committedContentResults=[]
         generation += 1
         currentSnapshot=makeSnapshot(generation: generation)
-        firstBatchMilliseconds=nil; completedMilliseconds=nil; searchError=nil; searchLimited=false
         previewTicket?.cancel(); previewKey=nil; clearPreview()
-        searchPhase = searchVisible && !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ? .searching : .idle
-        searching = searchPhase == .searching
-        guard searchVisible, !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else {
-            service?.setUserActive(false)
+        beginSearchPresentation()
+        if canSearch {
+            if activityWork == nil { service?.setUserActive(true) }
+            activityWork?.cancel()
+            let release=DispatchWorkItem { [weak self] in self?.endUserActivity() }
+            activityWork=release
+            DispatchQueue.main.asyncAfter(deadline:.now()+0.8,execute:release)
+            startSearch(preservePresentation:false,delay:0.035)
+        } else {
+            endUserActivity()
             if query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { hits=[]; selectedID=nil; searchMilliseconds=0 }
-            return
         }
-        service?.setUserActive(true)
-        let release=DispatchWorkItem { [weak self] in self?.service?.setUserActive(false) }
-        activityWork=release; DispatchQueue.main.asyncAfter(deadline:.now()+0.8,execute:release)
+    }
+    private func endUserActivity() {
+        guard let activityWork else { return }
+        activityWork.cancel()
+        self.activityWork=nil
+        service?.setUserActive(false)
+    }
+    private func beginSearchPresentation() {
+        firstBatchMilliseconds=nil; completedMilliseconds=nil; searchError=nil; searchLimited=false
+        searchPhase=canSearch ? .searching : .idle
+        searching=canSearch
+        searchStartedAt=Date()
+    }
+    private func startSearch(preservePresentation:Bool,publishNames:Bool = false,delay:TimeInterval) {
+        let token=UUID(); searchToken=token
         let ticket=SearchTicket(); searchTicket=ticket
         let text=query; let options=SearchOptions(kind:kind,rootID:rootID,scope:scope,sort:sort,onlineOnly:!preferences.retainOffline,limit:500)
-        let typedAt=Date(); searchStartedAt=typedAt
+        let startedAt=Date()
+        let previousContent=publishNames ? committedContentResults : []
         let item=DispatchWorkItem { [weak self] in
             guard let self, !ticket.isCancelled else { return }
             self.searchWork=nil
             guard let database=self.searchDatabase else {
-                self.searchFailed(NSError(domain:"Miji.Search",code:1,userInfo:[NSLocalizedDescriptionKey:"索引数据库无法打开"]),token:token,ticket:ticket); return
+                self.searchFailed(NSError(domain:"Miji.Search",code:1,userInfo:[NSLocalizedDescriptionKey:"索引数据库无法打开"]),token:token,ticket:ticket,preservePresentation:preservePresentation); return
             }
-            self.searching=true
             let execute=self.searchExecutor, engine=self.nameEngine
             self.searchQueue.async { [weak self] in
                 guard !ticket.isCancelled else { return }
                 do {
                     if let execute {
                         let result=try execute(database,text,options,{ticket.isCancelled})
-                        DispatchQueue.main.async { self?.publish(result,token:token,ticket:ticket,elapsed:Date().timeIntervalSince(typedAt)*1000,finished:true) }
+                        DispatchQueue.main.async { self?.publish(result,token:token,ticket:ticket,elapsed:Date().timeIntervalSince(startedAt)*1000,finished:true,preservePresentation:preservePresentation) }
                         return
                     }
                     var first:[SearchHit]=[]
@@ -310,10 +368,19 @@ final class AppModel: ObservableObject {
                         first=Array(first.prefix(options.limit))
                     }
                     let names=first
+                    // During a catalog refresh, show fresh names without
+                    // temporarily dropping unchanged body matches.
+                    let initial: [SearchHit]
+                    if publishNames {
+                        let retained=try Self.retainCurrentBodyHits(previousContent,database:database,options:options,cancelled:{ticket.isCancelled})
+                        initial=SearchResultMerger.merge(nameResults:names,contentResults:retained,scope:options.scope,sort:options.sort,limit:options.limit,query:text)
+                    } else { initial=names }
                     DispatchQueue.main.async {
                         guard let self,self.searchToken==token,!ticket.isCancelled else { return }
                         let finished=options.scope == .name
-                        self.publish(names,token:token,ticket:ticket,elapsed:options.scope == .name || !names.isEmpty ? Date().timeIntervalSince(typedAt)*1000 : nil,finished:finished)
+                        if finished || !preservePresentation || publishNames {
+                            self.publish(initial,token:token,ticket:ticket,elapsed:finished || !names.isEmpty ? Date().timeIntervalSince(startedAt)*1000 : nil,finished:finished,preservePresentation:preservePresentation)
+                        }
                         guard !finished,let contentDatabase=self.contentDatabase else { return }
                         let supplement=self.supplementaryExecutor, testDelay=self.testContentDelay
                         self.contentQueue.async { [weak self] in
@@ -333,58 +400,104 @@ final class AppModel: ObservableObject {
                                 if let supplement {extra=try supplement(contentDatabase,text,options,{ticket.isCancelled})}
                                 else {
                                     extra=try contentDatabase.searchSupplementary(text,options:options,cancelled:{ticket.isCancelled},onPartial:{ partial in
-                                        guard !ticket.isCancelled else {return}
+                                        guard !ticket.isCancelled,!preservePresentation else {return}
                                         let result=merge(partial)
-                                        let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(typedAt)*1000 : nil
+                                        let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(startedAt)*1000 : nil
                                         deliveredPartial=true
                                         DispatchQueue.main.async {self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:false)}
                                     },onMetrics:{ metrics in limited=metrics.budgetExhausted || metrics.resultTruncated })
                                 }
                                 let result=merge(extra)
-                                let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(typedAt)*1000 : nil
+                                let elapsed=names.isEmpty && !deliveredPartial ? Date().timeIntervalSince(startedAt)*1000 : nil
                                 let finalLimited=limited
-                                DispatchQueue.main.async { self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:true,limited:finalLimited) }
-                            } catch { DispatchQueue.main.async { self?.searchFailed(error,token:token,ticket:ticket) } }
+                                DispatchQueue.main.async {
+                                    self?.publish(result,token:token,ticket:ticket,elapsed:elapsed,finished:true,
+                                                  limited:finalLimited,preservePresentation:preservePresentation,contentResults:extra)
+                                }
+                            } catch { DispatchQueue.main.async { self?.searchFailed(error,token:token,ticket:ticket,preservePresentation:preservePresentation) } }
                         }
                     }
-                } catch { DispatchQueue.main.async { self?.searchFailed(error,token:token,ticket:ticket) } }
+                } catch { DispatchQueue.main.async { self?.searchFailed(error,token:token,ticket:ticket,preservePresentation:preservePresentation) } }
             }
         }
-        searchWork=item; DispatchQueue.main.asyncAfter(deadline:.now()+0.035,execute:item)
+        searchWork=item; DispatchQueue.main.asyncAfter(deadline:.now()+delay,execute:item)
     }
-    private func publish(_ result:[SearchHit],token:UUID,ticket:SearchTicket,elapsed:Double?,finished:Bool,limited:Bool? = nil) {
+    private nonisolated static func retainCurrentBodyHits(_ previous:[SearchHit],database:SearchDatabase,options:SearchOptions,
+                                                        cancelled:() -> Bool) throws -> [SearchHit] {
+        guard !previous.isEmpty else { return [] }
+        let refreshed=try database.nameHits(ids:previous.map(\.id),query:"",cancelled:cancelled)
+        let current=Dictionary(uniqueKeysWithValues:refreshed.map { ($0.id,$0) })
+        return previous.compactMap { old in
+            guard let new=current[old.id],(!options.onlineOnly || new.root.isOnline),
+                  old.file.rootID == new.file.rootID,old.file.relativePath == new.file.relativePath,
+                  old.file.name == new.file.name,old.file.kind == new.file.kind,old.file.fileExtension == new.file.fileExtension,
+                  old.file.inode == new.file.inode,old.file.modified == new.file.modified,old.file.size == new.file.size,
+                  old.file.contentState == new.file.contentState,old.file.contentError == new.file.contentError else { return nil }
+            var hit=old
+            hit.file=new.file; hit.root=new.root
+            return hit
+        }
+    }
+    private func publish(_ result:[SearchHit],token:UUID,ticket:SearchTicket,elapsed:Double?,finished:Bool,
+                         limited:Bool? = nil,preservePresentation:Bool = false,contentResults:[SearchHit] = []) {
         guard searchToken==token,!ticket.isCancelled else { return }
         let previous=selected
-        if let limited {searchLimited=limited}
-        hits=result; displayedSnapshot=currentSnapshot; searching = !finished
-        searchPhase = finished ? .complete : (result.isEmpty ? .searching : .supplementing)
-        if firstBatchMilliseconds == nil && !result.isEmpty { firstBatchMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
-        if finished { completedMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
-        if let elapsed { searchMilliseconds=elapsed }
         let preserved=previous.flatMap { old in result.first { $0.file.rootID == old.file.rootID && $0.file.relativePath == old.file.relativePath } }
-        if let preserved { if selectedID != preserved.id { selectedID=preserved.id } else { loadPreview() } }
+        if preservePresentation && !finished && (result.isEmpty || (previous != nil && preserved == nil)) { return }
+        if let limited {searchLimited=limited}
+        hits=result
+        if !preservePresentation {
+            displayedSnapshot=currentSnapshot; searching = !finished
+            searchPhase = finished ? .complete : (result.isEmpty ? .searching : .supplementing)
+            if firstBatchMilliseconds == nil && !result.isEmpty { firstBatchMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
+            if finished { completedMilliseconds=Date().timeIntervalSince(searchStartedAt)*1000 }
+            if let elapsed { searchMilliseconds=elapsed }
+        }
+        if let preserved {
+            if selectedID != preserved.id { selectedID=preserved.id }
+            else { loadPreview(checkStoredContent:preservePresentation && finished) }
+        }
         else { selectedID=result.first?.id }
-        if finished && searchNeedsRefresh { scheduleSearch() }
-    }
-    private func searchFailed(_ error:Error,token:UUID,ticket:SearchTicket) {
-        guard searchToken==token,!ticket.isCancelled else { return }
-        searching=false
-        if !(error is CancellationError) {
-            searchPhase = .failed; searchError=error.localizedDescription
-            message="搜索失败：\(error.localizedDescription)"
+        if finished {
+            committedContentResults=contentResults
+            finishSearch()
         }
     }
-    func loadPreview() {
+    private func searchFailed(_ error:Error,token:UUID,ticket:SearchTicket,preservePresentation:Bool) {
+        guard searchToken==token,!ticket.isCancelled else { return }
+        if !preservePresentation {
+            searching=false
+            if !(error is CancellationError) {
+                searchPhase = .failed; searchError=error.localizedDescription
+                message="搜索失败：\(error.localizedDescription)"
+            }
+        }
+        finishSearch()
+    }
+    private func finishSearch() {
+        searchTicket=nil
+        searchIndexChangesIfReady()
+    }
+    func loadPreview(checkStoredContent:Bool = false) {
         guard searchVisible,previewVisible,let hit=selected,isCurrentResult(hit),SearchPreviewPolicy.hasContent(hit),let database=previewDatabase else {
-            previewTicket?.cancel();previewKey=nil;clearPreview();return
+            if previewKey != nil { previewTicket?.cancel();previewKey=nil;clearPreview() }
+            return
         }
         let key="\(hit.id)|\(hit.path)|\(hit.file.inode)|\(hit.file.modified)|\(hit.file.size)|\(hit.file.contentState)|\(hit.file.contentError ?? "")|\(hit.root.isOnline)|\(query)|\(hit.matchedIn)|\(hit.snippet)|\(hit.labels)"
-        guard key != previewKey else{return}
-        previewTicket?.cancel();previewKey=key;previewQuery=query;clearPreview()
-        let ticket=SearchTicket();previewTicket=ticket;previewLoading=true
+        let keyChanged=key != previewKey
+        guard keyChanged || checkStoredContent else { return }
+        if !keyChanged && previewLoading { previewNeedsContentCheck=true;return }
+        let previousIdentity=previewContentIdentity
+        previewTicket?.cancel();previewKey=key
+        if keyChanged { clearPreview(); previewLoading=true }
+        let ticket=SearchTicket();previewTicket=ticket
         let query=query, snapshot=displayedSnapshot
         previewQueue.async { [weak self] in
             guard !ticket.isCancelled else{return}
+            let identity: Data?
+            do { identity=try database.storedContentIdentity(fileID:hit.id) }
+            catch { guard keyChanged else {return}; identity=nil }
+            if !keyChanged && identity == previousIdentity { return }
             let content=try? database.storedContent(fileID:hit.id)
             var resolution=PreviewResolver.resolve(hit:hit,content:content,query:query,cancelled:{ticket.isCancelled})
             guard !ticket.isCancelled else{return}
@@ -405,12 +518,19 @@ final class AppModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 guard let self,!ticket.isCancelled,self.searchVisible,self.selectedID==hit.id,self.displayedSnapshot==snapshot,self.isCurrentResult(hit) else { return }
+                self.previewContentIdentity=identity
                 self.previewText=resolution.text;self.previewWarning=resolution.warning
                 self.previewLocalURL=localURL;self.previewPage=resolution.page;self.previewLine=resolution.line;self.previewPDF=document;self.previewLoading=false
+                if self.previewNeedsContentCheck {
+                    self.previewNeedsContentCheck=false
+                    self.loadPreview(checkStoredContent:true)
+                }
             }
         }
     }
     private func clearPreview() {
+        previewContentIdentity=nil
+        previewNeedsContentCheck=false
         previewText="";previewWarning=nil;previewPage=nil;previewLine=nil;previewPDF=nil;previewLocalURL=nil;previewLoading=false
     }
     func addFolder() {
@@ -441,7 +561,8 @@ final class AppModel: ObservableObject {
     }
     func savePreferences() {
         if let data=try? JSONEncoder().encode(preferences) { UserDefaults.standard.set(data,forKey:"indexingPreferences") }
-        service?.configure(preferences); scheduleSearch()
+        service?.configure(preferences)
+        if let snapshot=currentSnapshot,snapshot != makeSnapshot(generation:generation) { scheduleSearch() }
     }
     func togglePause() { paused.toggle(); service?.setPaused(paused) }
     private func makeSnapshot(generation: UInt64) -> SearchSnapshot {

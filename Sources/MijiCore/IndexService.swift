@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreServices
+import Darwin
 
 public struct IndexProgress: Sendable {
     public var phase: String
@@ -9,7 +10,7 @@ public struct IndexProgress: Sendable {
     public var busy: Bool
     public init(phase: String = "准备就绪", detail: String = "", processed: Int = 0, busy: Bool = false) { self.phase=phase; self.detail=detail; self.processed=processed; self.busy=busy }
 }
-public struct IndexingPreferences: Codable, Sendable {
+public struct IndexingPreferences: Codable, Equatable, Sendable {
     public var images = true
     public var documents = true
     public var externalImages = true
@@ -27,6 +28,7 @@ public final class IndexService: @unchecked Sendable {
     public var onProgress: ((IndexProgress) -> Void)?
     public var onChange: (() -> Void)?
     public var onIndexChange: ((IndexChange) -> Void)?
+    public var onContentChange: (() -> Void)?
     private let lock = NSLock()
     private let work = DispatchQueue(label: "local.miji.index", qos: .utility)
     private let control = DispatchQueue(label: "local.miji.control", qos: .utility)
@@ -35,6 +37,7 @@ public final class IndexService: @unchecked Sendable {
     private var fullRequested = false
     private var userActive = false
     private var sleeping = false
+    private var lastSavedState: IncrementalIndexState
     private var state: IncrementalIndexState
     private let stateURL: URL
     private let watchEvents: Bool
@@ -53,12 +56,52 @@ public final class IndexService: @unchecked Sendable {
     private var nextScanAfter = Date.distantPast
     private let rescanInterval: TimeInterval = 10
     private let extractor: (URL, @escaping () -> Bool) throws -> ExtractedContent
-    private let contentClock: () -> TimeInterval
-    // Only accessed on work. Keep both roots and content kinds moving, even
-    // when a slow image consumes the entire time slice by itself.
-    private var contentLaneCursor = 0
-    private let contentBatchLimit = 6
-    private let contentBatchSeconds: TimeInterval = 0.25
+    // Accessed only by the single heavy worker.
+    private let extractionReuse: ExtractionReuse?
+    private static let heavyDocumentExtensions = ["pdf","pages","numbers","key","keynote","rtfd","doc","ppt","xls","docx","pptx","xlsx","epub"]
+    static let heavyDocumentExtensionsSQL = heavyDocumentExtensions.map { "'" + $0 + "'" }.joined(separator:",")
+    private static func isHeavy(_ file: FileRecord) -> Bool {
+        file.kind == .image || Self.heavyDocumentExtensions.contains(file.fileExtension)
+    }
+    private enum ContentLane: CaseIterable { case light, heavy }
+    private struct ContentPath: Hashable {
+        var rootID: String
+        var path: String
+    }
+    private struct FreshContent {
+        var first: TimeInterval
+        var ready: TimeInterval
+    }
+    private struct ContentClaim {
+        var key: ContentPath
+        var root: IndexedRoot
+        var file: FileRecord
+        var epoch: UInt64
+    }
+    private enum ExtractionResult {
+        case done(Data), failed(String), changed, interrupted
+    }
+    private let lightWorker = DispatchQueue(label:"local.miji.index.light-content", qos:.utility)
+    private let heavyWorker = DispatchQueue(label:"local.miji.index.heavy-content", qos:.utility)
+    // The writer queue owns these claims. The lock protects only epoch and
+    // lifecycle flags consulted by the workers, and the durable event inbox.
+    private var claims: [ContentLane:ContentClaim] = [:]
+    private var contentEpoch: UInt64 = 0
+    private var freshContent: [ContentPath:FreshContent] = [:]
+    private var freshRuns: [ContentLane:Int] = [:]
+    private var contentCursors: [ContentLane:Int] = [:]
+    private var contentWake: DispatchWorkItem?
+    private var contentWakeDeadline: TimeInterval?
+    private var emptyContentLanes = Set<ContentLane>()
+    private var scanRootCursor = 0
+    private var rootsNeedRefresh = true
+    private var currentRoots: [IndexedRoot] = []
+    private var idlePublished = false
+    private var scanCheckpointWrite: TimeInterval = 0
+    private var delayedFullScan: DispatchWorkItem?
+    private let currentEventID: () -> UInt64
+    private let probeRoot: (IndexedRoot) -> IndexedRoot
+    private let detectClockReset: Bool
     public convenience init(database: SearchDatabase, ignoredPaths: [String] = [], extractionWorker: URL? = nil) {
         self.init(database:database,ignoredPaths:ignoredPaths,extractor: { url,cancelled in
             let ext=url.pathExtension.lowercased()
@@ -66,15 +109,18 @@ public final class IndexService: @unchecked Sendable {
                 return try IsolatedContentExtractor.extract(url:url,executable:extractionWorker,cancelled:cancelled)
             }
             return try ContentExtractor.extract(url:url,cancelled:cancelled)
-        })
+        }, reuseHeavyInputs: ProcessInfo.processInfo.environment["MIJI_DISABLE_EXTRACTION_REUSE"] != "1")
     }
     init(database: SearchDatabase, ignoredPaths: [String] = [], extractor: @escaping (URL, @escaping () -> Bool) throws -> ExtractedContent,
-         contentClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         watchEvents: Bool = true, stateURL: URL? = nil) {
+         watchEvents: Bool = true, stateURL: URL? = nil, reuseHeavyInputs: Bool = false,
+         currentEventID: (() -> UInt64)? = nil,
+         probeRoot: @escaping (IndexedRoot) -> IndexedRoot = VolumeIdentity.refreshed) {
         self.database = database
         let inboxURL=stateURL ?? database.url.appendingPathExtension("incremental.json")
         self.stateURL=inboxURL
-        self.state=IncrementalIndexState.read(inboxURL)
+        let saved=IncrementalIndexState.read(inboxURL)
+        self.state=saved
+        self.lastSavedState=saved
         for (id,root) in self.state.roots where root.scan == nil {
             // Older versions have no saved traversal cursor. They start a new
             // scan, so overlapping legacy queues can safely be combined once.
@@ -84,13 +130,18 @@ public final class IndexService: @unchecked Sendable {
         self.watchEvents=watchEvents
         self.ignoredPaths = ignoredPaths + [inboxURL.path,inboxURL.appendingPathExtension("tmp").path]
         self.extractor = extractor
-        self.contentClock = contentClock
+        extractionReuse = reuseHeavyInputs ? ExtractionReuse() : nil
+        self.currentEventID = currentEventID ?? { FSEventsGetCurrentEventId() }
+        self.probeRoot = probeRoot
+        self.detectClockReset = watchEvents || currentEventID != nil
     }
     private func locked<T>(_ block: () throws -> T) rethrows -> T { lock.lock(); defer { lock.unlock() }; return try block() }
     public func configure(_ preferences: IndexingPreferences) {
         let rescan=locked { () -> Bool in
             let changed=self.preferences.includeHidden != preferences.includeHidden || self.preferences.excludeDevelopmentCaches != preferences.excludeDevelopmentCaches
+            if self.preferences != preferences { contentEpoch &+= 1 }
             self.preferences=preferences
+            rootsNeedRefresh=true
             return changed
         }
         if rescan { requestScan() } else { wakeWork() }
@@ -102,20 +153,20 @@ public final class IndexService: @unchecked Sendable {
             timer.schedule(deadline:.now()+30,repeating:30)
             // Probe mount/root changes and continue pending extraction. This
             // heartbeat never requests a periodic whole-root enumeration.
-            timer.setEventHandler { [weak self] in self?.wakeWork() }
+            timer.setEventHandler { [weak self] in self?.requestIncrementalUpdate() }
             self.timer=timer;timer.resume()
             let center=NSWorkspace.shared.notificationCenter
             self.workspaceObservers=[
                 center.addObserver(forName:NSWorkspace.willSleepNotification,object:nil,queue:nil) { [weak self] _ in self?.setSystemSleeping(true) },
                 center.addObserver(forName:NSWorkspace.didWakeNotification,object:nil,queue:nil) { [weak self] _ in self?.setSystemSleeping(false) },
-                center.addObserver(forName:NSWorkspace.didMountNotification,object:nil,queue:nil) { [weak self] _ in self?.wakeWork() },
-                center.addObserver(forName:NSWorkspace.didUnmountNotification,object:nil,queue:nil) { [weak self] _ in self?.wakeWork() }
+                center.addObserver(forName:NSWorkspace.didMountNotification,object:nil,queue:nil) { [weak self] _ in self?.requestIncrementalUpdate() },
+                center.addObserver(forName:NSWorkspace.didUnmountNotification,object:nil,queue:nil) { [weak self] _ in self?.requestIncrementalUpdate() }
             ]
         }
         wakeWork()
     }
     public func stop() {
-        locked { stopped=true }
+        locked { stopped=true;contentEpoch &+= 1 }
         control.async { [weak self] in
             guard let self else { return }
             self.timer?.cancel();self.timer=nil;self.watcher=nil;self.debounce?.cancel();self.debounce=nil
@@ -124,30 +175,31 @@ public final class IndexService: @unchecked Sendable {
         }
     }
     public func setPaused(_ value: Bool) {
-        locked { paused=value }
+        locked { if value && !paused { contentEpoch &+= 1 }; paused=value }
         if value { emit("已暂停","搜索现有索引仍然可用") } else { wakeWork() }
     }
     /// Finish the current valid extraction, then yield metadata and content work
     /// while the user is typing. No completed result is discarded to yield.
     public func setUserActive(_ value: Bool) { locked { userActive=value }; if !value { wakeWork() } }
-    func setSystemSleeping(_ value: Bool) { locked { sleeping=value }; if !value { wakeWork() } }
+    func setSystemSleeping(_ value: Bool) { locked { if value && !sleeping { contentEpoch &+= 1 }; sleeping=value }; if !value { requestIncrementalUpdate() } }
     /// Explicit refresh remains a full reconciliation, with storm coalescing.
-    public func requestScan() { locked { fullRequested=true }; wakeWork() }
-    public func requestIncrementalUpdate() { wakeWork() }
+    public func requestScan() { locked { fullRequested=true;rootsNeedRefresh=true }; wakeWork() }
+    public func requestIncrementalUpdate() { locked { rootsNeedRefresh=true };wakeWork() }
     private func wakeWork() {
-        let delay=locked { () -> TimeInterval? in
+        let start=locked { () -> Bool in
             requested=true
-            guard !running, !stopped, !paused, !sleeping, !userActive, mutations == 0 else { return nil }
+            guard !running, !stopped, !paused, !sleeping, !userActive, mutations == 0 else { return false }
             running=true
-            return fullRequested ? max(0,nextScanAfter.timeIntervalSinceNow) : 0
+            return true
         }
-        if let delay { work.asyncAfter(deadline:.now()+delay) { [weak self] in self?.run() } }
+        if start { work.async { [weak self] in autoreleasepool { self?.run() } } }
     }
     public func mutate(_ action: @escaping (SearchDatabase) throws -> Void, completion: @escaping (Error?) -> Void = {_ in}) {
-        locked { mutations += 1 }
+        locked { mutations += 1;contentEpoch &+= 1;rootsNeedRefresh=true }
         work.async { [weak self] in
             guard let self else { return }
             var failure:Error?
+            let changesBefore=self.database.dataChangeCount()
             do {
                 let before=try self.database.roots()
                 try action(self.database)
@@ -162,14 +214,20 @@ public final class IndexService: @unchecked Sendable {
                 }
             } catch { failure=error }
             self.locked { self.mutations -= 1 }
-            completion(failure);self.onChange?();self.wakeWork()
+            completion(failure)
+            if self.database.dataChangeCount() != changesBefore {self.onContentChange?()}
+            self.onChange?()
+            self.wakeWork()
         }
     }
     private var interrupted: Bool { locked { stopped || paused || sleeping || mutations > 0 } }
     private var yielding: Bool { interrupted || locked { userActive } }
-    private var contentInterrupted: Bool { interrupted }
     private func emit(_ phase: String, _ detail: String = "", count: Int = 0, busy: Bool = false) { onProgress?(IndexProgress(phase:phase,detail:detail,processed:count,busy:busy)) }
-    private func persistState() throws { try state.write(stateURL) }
+    private func persistState() throws {
+        guard state != lastSavedState else {return}
+        try state.write(stateURL)
+        lastSavedState=state
+    }
 
     /// Called by the watcher, and exposed internally for deterministic fixtures.
     /// Event IDs are checkpointed only together with their durable dirty scopes.
@@ -233,215 +291,456 @@ public final class IndexService: @unchecked Sendable {
                 }
             }
         }
-        let currentID=FSEventsGetCurrentEventId()
+        let oldRoots=Dictionary(uniqueKeysWithValues:roots.map { ($0.id,$0) })
         let ids=Set(roots.map(\.id))
         scanSessions=scanSessions.filter {ids.contains($0.key)}
-        let manualFull=locked { () -> Bool in
-            if fullRequested && Date() >= nextScanAfter { fullRequested=false;return true }
-            return false
-        }
-        try locked {
-            let ids=Set(roots.map(\.id))
+        locked {
             state.roots=state.roots.filter { ids.contains($0.key) }
-            try persistState()
         }
-        for existing in roots {
-            let root=VolumeIdentity.refreshed(existing)
+        for index in roots.indices {
+            roots[index]=probeRoot(roots[index])
+            let root=roots[index]
+            let existing=oldRoots[root.id]
             try database.saveRoot(root)
-            try locked {
+            let changed=locked { () -> Bool in
+                // Sample the event clock under the same lock as receiveEvents.
+                // A cursor advanced during mount probing is not a clock reset.
+                let currentID=currentEventID()
                 if let old=state.roots[root.id] {
-                    // Keep arrivals separate from a suspended traversal: a new
-                    // file may be behind its cursor and must be scanned again.
-                    if old.path != root.path || old.cursor > currentID || (!existing.isOnline && root.isOnline) {
-                        state.roots[root.id]?.path=root.path
-                        state.roots[root.id]?.cursor=currentID
-                        state.roots[root.id]?.scan=nil
-                        state.enqueue([""],rootID:root.id)
+                    if old.path != root.path || (detectClockReset && old.cursor > currentID) ||
+                        (existing?.isOnline == false && root.isOnline) {
+                        state.roots[root.id] = .init(path:root.path,cursor:currentID,pending:[""])
+                        return true
                     }
-                } else {
-                    // First installation/migration has no replay cursor. Seed
-                    // before scanning, so events during the scan are durable.
-                    state.roots[root.id] = .init(path:root.path,cursor:currentID,pending:[""])
+                    if root.isOnline, root.enabled, let paths=old.deferredRetry {
+                        state.roots[root.id]?.deferredRetry=nil
+                        state.enqueue(paths,rootID:root.id)
+                    }
+                    return existing?.isOnline != root.isOnline
                 }
-                if manualFull { state.roots[root.id]?.scan=nil;state.enqueue([""],rootID:root.id) }
-                try persistState()
+                state.roots[root.id] = .init(path:root.path,cursor:currentID,pending:[""])
+                return true
+            }
+            if changed {
+                scanSessions.removeValue(forKey:root.id)
+                onIndexChange?(IndexChange(rootID:root.id,relativePaths:[""],fullRescan:true))
+                onChange?()
             }
         }
-        roots=roots.map(VolumeIdentity.refreshed)
+        try locked { try persistState() }
         updateWatchers(roots)
         return roots
     }
-    /// A bounded slice shared by startup, scan checkpoints and the final drain.
-    /// The deadline is checked between files: cancelling an otherwise valid OCR
-    /// for scheduling would discard its work and repeatedly starve that file.
-    private func drainContent(roots: [IndexedRoot], preferences prefs: IndexingPreferences) throws -> Bool {
-        // Includes metadata validation and database encoding, not just Vision.
-        try autoreleasepool { try drainContentBatch(roots:roots,preferences:prefs) }
-    }
-    private func drainContentBatch(roots: [IndexedRoot], preferences prefs: IndexingPreferences) throws -> Bool {
-        var lanes: [(root: IndexedRoot, kind: FileKind)] = []
-        for root in roots where root.enabled && root.isOnline {
-            if prefs.documents && (!root.isExternal || prefs.externalDocuments) { lanes.append((root,.document)) }
-            if prefs.images && (!root.isExternal || prefs.externalImages) { lanes.append((root,.image)) }
-            if prefs.documents && (!root.isExternal || prefs.externalDocuments) { lanes.append((root,.code)) }
+
+    private func processFullRequest() throws {
+        guard locked({ fullRequested }) else { return }
+        let delay=nextScanAfter.timeIntervalSinceNow
+        if delay > 0 {
+            guard delayedFullScan == nil else {return}
+            let item=DispatchWorkItem { [weak self] in
+                self?.delayedFullScan=nil
+                self?.requestIncrementalUpdate()
+            }
+            delayedFullScan=item
+            work.asyncAfter(deadline:.now()+delay,execute:item)
+            return
         }
-        guard !lanes.isEmpty else { return false }
-        let deadline=contentClock() + contentBatchSeconds
-        var handled=false, attempts=0, emptyLanes=0
-        var offlineRoots=Set<String>()
-        while !yielding && attempts < contentBatchLimit && emptyLanes < lanes.count {
-            // Empty-lane lookups must not turn a time slice into a false idle
-            // result while another kind/root still has pending work.
-            if attempts > 0 && contentClock() >= deadline { break }
-            let lane=lanes[contentLaneCursor % lanes.count]
-            contentLaneCursor=(contentLaneCursor + 1) % lanes.count
-            let root=VolumeIdentity.refreshed(lane.root)
-            guard !offlineRoots.contains(root.id), root.isOnline,
-                  let file=try database.pendingFiles(rootID:root.id,limit:1,kind:lane.kind).first else {
-                emptyLanes += 1; continue
+        delayedFullScan?.cancel()
+        delayedFullScan=nil
+        try locked {
+            fullRequested=false
+            for root in currentRoots {
+                // An existing full traversal already reconciles the root.
+                if state.roots[root.id]?.inFlight.first != "" {
+                    state.enqueue([""],rootID:root.id)
+                }
             }
-            emptyLanes=0; attempts += 1
-            if contentInterrupted { break }
-            emit(lane.kind == .image ? "正在识别图片" : "正在提取文档",file.name,busy:true)
-            // onProgress may synchronously pause, stop or enqueue a mutation.
-            if yielding { break }
-            let url=URL(fileURLWithPath:root.path).appendingPathComponent(file.relativePath)
-            do {
-                let content=try autoreleasepool { try extractor(url,{ self.contentInterrupted }) }
-                if contentInterrupted { break }
-                guard VolumeIdentity.refreshed(root).isOnline else {
-                    offlineRoots.insert(root.id); wakeWork(); continue
-                }
-                if try !FileSignature.read(url).matches(file) {
-                    try database.failContent(file:file,message:"文件正在修改，将在下次扫描后重试")
-                    handled=true; receiveEvents([FileChangeEvent(path:url.path)]); onChange?(); continue
-                }
-                _ = try database.completeContent(file:file,content:content)
-                handled=true
-            } catch {
-                if contentInterrupted { break }
-                if !VolumeIdentity.refreshed(root).isOnline {
-                    offlineRoots.insert(root.id); wakeWork(); continue
-                }
-                try database.failContent(file:file,message:error.localizedDescription)
-                handled=true
+            try persistState()
+        }
+    }
+
+    private func options(_ preferences: IndexingPreferences) -> ScanOptions {
+        ScanOptions(includeHidden:preferences.includeHidden,excludeDevelopmentCaches:preferences.excludeDevelopmentCaches)
+    }
+
+    private func exactScope(_ path: String, root: IndexedRoot) -> Bool {
+        var info=stat()
+        let absolute=URL(fileURLWithPath:root.path).appendingPathComponent(path).path
+        if lstat(absolute,&info) == 0 {return info.st_mode & S_IFMT != S_IFDIR}
+        return errno == ENOENT || errno == ENOTDIR
+    }
+
+    private func scanSlice(root: IndexedRoot, preferences: IndexingPreferences) throws -> Bool {
+        guard let scope=try locked({ () throws -> String? in
+            guard var inbox=state.roots[root.id] else {return nil}
+            if inbox.inFlight.isEmpty, !inbox.pending.isEmpty {
+                inbox.inFlight=inbox.pending
+                inbox.pending=[]
+                state.roots[root.id]=inbox
+                try persistState()
             }
+            return inbox.inFlight.first
+        }) else {return false}
+
+        let online=probeRoot(root)
+        guard online.isOnline, online.path == root.path else {
+            locked { rootsNeedRefresh=true;requested=true }
+            return false
+        }
+        let opts=options(preferences)
+        let saved=locked {state.roots[root.id]?.scan}
+        let scanner=FileScanner(database:database,ignoredPaths:ignoredPaths)
+        let session:FileScanSession
+        if let live=scanSessions[root.id], !live.finished,
+           live.checkpoint.rootPath == root.path, live.checkpoint.scope == scope,
+           live.checkpoint.options == opts {session=live}
+        else {
+            guard let current=try database.indexedRoot(id:root.id) else {return false}
+            session=try scanner.session(root:current,relativePath:scope,options:opts,checkpoint:saved)
+            scanSessions[root.id]=session
+        }
+
+        // Keep one durable primary scan. A few exact paths can jump ahead of
+        // it each turn. Broad subtree work uses a primary session of its own.
+        if scope.isEmpty && session.checkpoint.started {
+            for _ in 0..<4 {
+                guard !yielding else {return true}
+                guard try scanInterleaved(root:root,scanner:scanner,primary:session,options:opts) else {break}
+            }
+        }
+        let stopAt=ProcessInfo.processInfo.systemUptime + 0.05
+        try advance(session,root:root,scope:scope,deadline:stopAt,saveCheckpoint:true)
+        if session.finished { scanSessions.removeValue(forKey:root.id) }
+        return true
+    }
+
+    private func scanInterleaved(root: IndexedRoot, scanner: FileScanner, primary: FileScanSession, options: ScanOptions) throws -> Bool {
+        guard let snapshot=locked({state.roots[root.id]}) else {return false}
+        let candidate=snapshot.interleaved ?? snapshot.pending.prefix(16).first(where:{ !$0.isEmpty && exactScope($0,root:root) })
+        guard let scope=candidate, !scope.isEmpty else {return false}
+        let exact=exactScope(scope,root:root)
+        let claimed=try locked { () throws -> Bool in
+            guard var inbox=state.roots[root.id], inbox.interleaved == scope || inbox.pending.contains(scope) else {return false}
+            if !exact {
+                // It became a directory. Keep it queued for a sliced traversal.
+                inbox.interleaved=nil
+                inbox.pending=IndexRelativePath.compacting(inbox.pending + [scope])
+            } else {
+                if inbox.interleaved == nil { inbox.pending.removeAll { $0 == scope } }
+                inbox.interleaved=scope
+                primary.preserveReconciledScope(scope)
+                inbox.scan=primary.checkpoint
+            }
+            state.roots[root.id]=inbox
+            try persistState()
+            return exact
+        }
+        guard claimed else {return false}
+        guard let current=try database.indexedRoot(id:root.id) else {return false}
+        let local=try scanner.session(root:current,relativePath:scope,options:options)
+        try advance(local,root:root,scope:scope,
+                    deadline:ProcessInfo.processInfo.systemUptime + 0.05,saveCheckpoint:false)
+        if !local.finished, !yielding {
+            // If the exact entry was replaced with a directory during stat,
+            // restart it later as an ordinary resumable subtree.
+            try locked {
+                guard var inbox=state.roots[root.id] else {return}
+                inbox.interleaved=nil
+                inbox.pending=IndexRelativePath.compacting(inbox.pending + [scope])
+                state.roots[root.id]=inbox
+                try persistState()
+            }
+        }
+        return local.finished
+    }
+
+    private func advance(_ session: FileScanSession, root: IndexedRoot, scope: String, deadline: TimeInterval, saveCheckpoint: Bool) throws {
+        var revision=try database.catalogRevision()
+        let originalRevision=revision
+        var eligibility=session.contentEligibilityRevision
+        func notify() {
+            if session.contentEligibilityRevision != eligibility {
+                eligibility=session.contentEligibilityRevision
+                emptyContentLanes.removeAll()
+                onContentChange?()
+                onChange?()
+            }
+            if let current=try? database.catalogRevision(), current != revision {
+                revision=current
+                emptyContentLanes.removeAll()
+                onIndexChange?(IndexChange(rootID:root.id,relativePaths:[scope],fullRescan:false))
+                onChange?()
+            }
+        }
+        let phase=scope.isEmpty ? "正在建立文件目录" : "正在更新文件目录"
+        let detail=scope.isEmpty ? root.name : scope
+        if !session.checkpoint.started {emit(phase,detail,busy:true)}
+        let result=try session.advance(cancelled:{self.yielding},
+            shouldYield:{ProcessInfo.processInfo.systemUptime >= deadline},maximumItems:300) { count in
+            notify()
+            self.emit(phase,detail,count:count,busy:true)
+        }
+        notify()
+        let now=ProcessInfo.processInfo.systemUptime
+        if session.finished || yielding || now - scanCheckpointWrite >= 1 {
+            try locked {
+                guard var inbox=state.roots[root.id] else {return}
+                if saveCheckpoint { inbox.scan=session.finished ? nil : session.checkpoint }
+                if session.finished {
+                    if saveCheckpoint {inbox.inFlight.removeAll { $0 == scope }}
+                    else {inbox.interleaved=nil}
+                    // Preserve failures for the next root probe or heartbeat.
+                    // Immediate retries would spin on inaccessible directories.
+                    if !result.preservingPaths.isEmpty {
+                        inbox.deferredRetry=IndexRelativePath.compacting((inbox.deferredRetry ?? []) + result.preservingPaths)
+                    }
+                }
+                state.roots[root.id]=inbox
+                try persistState()
+                scanCheckpointWrite=now
+            }
+        }
+        if session.finished && scope.isEmpty {
+            nextScanAfter=Date().addingTimeInterval(rescanInterval)
+            if originalRevision != revision {
+                onIndexChange?(IndexChange(rootID:root.id,relativePaths:[scope],fullRescan:true))
+            }
+        }
+        if session.finished && !scope.isEmpty {
+            emptyContentLanes.removeAll()
+            if try prioritizeContent(root:root,scope:scope,now:now) {onContentChange?()}
+        }
+        if session.finished, let error=result.errors.first { emit("部分位置无法读取",error) }
+    }
+
+    private func prioritizeContent(root: IndexedRoot, scope: String, now: TimeInterval) throws -> Bool {
+        let key=ContentPath(rootID:root.id,path:scope)
+        guard try database.pendingFile(rootID:root.id,path:scope) != nil else {
+            freshContent.removeValue(forKey:key)
+            return false
+        }
+        if freshContent[key] == nil && freshContent.count >= 4096 {return true}
+        let first=freshContent[key]?.first ?? now
+        freshContent[key]=FreshContent(first:first,ready:min(now+0.25,first+1))
+        return true
+    }
+
+    private func contentAllowed(_ kind: FileKind, root: IndexedRoot, preferences: IndexingPreferences) -> Bool {
+        guard root.enabled && root.isOnline else {return false}
+        if kind == .image {return preferences.images && (!root.isExternal || preferences.externalImages)}
+        return preferences.documents && (!root.isExternal || preferences.externalDocuments)
+    }
+
+    private func selectContent(lane: ContentLane, preferences: IndexingPreferences, now: TimeInterval) throws -> (IndexedRoot, FileRecord)? {
+        let roots=Dictionary(uniqueKeysWithValues:currentRoots.map { ($0.id,$0) })
+        var fresh: (IndexedRoot, FileRecord)?
+        for (key, time) in freshContent.sorted(by:{ $0.value.first < $1.value.first }) where time.ready <= now {
+            guard let root=roots[key.rootID], let file=try database.pendingFile(rootID:key.rootID,path:key.path) else {
+                freshContent.removeValue(forKey:key)
+                continue
+            }
+            if Self.isHeavy(file) == (lane == .heavy), contentAllowed(file.kind,root:root,preferences:preferences) {
+                fresh=(root,file)
+                break
+            }
+        }
+        let freshRun=freshRuns[lane,default:0]
+        if let fresh, freshRun < 3 {freshRuns[lane]=freshRun+1;return fresh}
+
+        let kinds:[FileKind]=lane == .heavy ? [.image,.document] : [.document,.code]
+        let pools=currentRoots.flatMap { root in
+            kinds.filter {contentAllowed($0,root:root,preferences:preferences)}.map { (root,$0) }
+        }
+        if !pools.isEmpty && !emptyContentLanes.contains(lane) {
+            for _ in pools {
+                let cursor=contentCursors[lane,default:0] % pools.count
+                contentCursors[lane]=(cursor+1)%pools.count
+                let (root,kind)=pools[cursor]
+                var after:Int64=0
+                while true {
+                    let pending=try database.pendingFiles(rootID:root.id,limit:32,kind:kind,heavy:lane == .heavy,afterID:after)
+                    if let row=pending.first(where:{freshContent[ContentPath(rootID:root.id,path:$0.relativePath)] == nil}) {
+                        freshRuns[lane]=0
+                        return (root,row)
+                    }
+                    guard let last=pending.last, pending.count == 32 else {break}
+                    after=last.id
+                }
+            }
+        }
+        emptyContentLanes.insert(lane)
+        if fresh != nil {freshRuns[lane]=1}
+        return fresh
+    }
+
+    private func launchContent(preferences: IndexingPreferences, epoch: UInt64) throws {
+        let now=ProcessInfo.processInfo.systemUptime
+        for lane in ContentLane.allCases where claims[lane] == nil && !yielding {
+            guard let (root,file)=try selectContent(lane:lane,preferences:preferences,now:now) else {continue}
+            let key=ContentPath(rootID:root.id,path:file.relativePath)
+            let claim=ContentClaim(key:key,root:root,file:file,epoch:epoch)
+            guard !claimCancelled(claim) else {return}
+            claims[lane]=claim
+            let worker=lane == .heavy ? heavyWorker : lightWorker
+            emit(file.kind == .image ? "正在识别图片" : "正在提取文档",file.name,busy:true)
+            worker.async { [weak self] in
+                guard let self else {return}
+                let result=autoreleasepool { self.extract(claim) }
+                self.work.async { [weak self] in
+                    autoreleasepool { self?.finishContent(lane:lane,claim:claim,result:result) }
+                }
+            }
+        }
+        if let next=freshContent.values.map(\.ready).filter({$0 > now}).min(), contentWakeDeadline != next {
+            contentWake?.cancel()
+            let item=DispatchWorkItem { [weak self] in
+                self?.contentWakeDeadline=nil
+                self?.wakeWork()
+            }
+            contentWake=item
+            contentWakeDeadline=next
+            work.asyncAfter(deadline:.now()+max(0,next-now),execute:item)
+        }
+    }
+
+    private func claimCancelled(_ claim: ContentClaim) -> Bool {
+        locked { !canCommit(claim) }
+    }
+
+    // Called with the lifecycle lock held.
+    private func canCommit(_ claim: ContentClaim) -> Bool {
+        contentEpoch == claim.epoch && !stopped && !paused && !sleeping && mutations == 0
+    }
+
+    private struct ChangeStamp: Equatable {
+        var device: Int32
+        var inode: UInt64
+        var seconds: Int
+        var nanoseconds: Int
+    }
+
+    private func stamp(_ url: URL) -> ChangeStamp? {
+        var info=stat()
+        guard lstat(url.path,&info) == 0 else {return nil}
+        return ChangeStamp(device:info.st_dev,inode:info.st_ino,seconds:info.st_ctimespec.tv_sec,nanoseconds:info.st_ctimespec.tv_nsec)
+    }
+
+    private func extract(_ claim: ContentClaim) -> (ExtractionResult, ChangeStamp?) {
+        let url=URL(fileURLWithPath:claim.root.path).appendingPathComponent(claim.key.path)
+        guard !claimCancelled(claim) else {return (.interrupted,nil)}
+        let before=stamp(url)
+        do {
+            guard try FileSignature.read(url).matches(claim.file) else {return (.changed,before)}
+            let reuse = Self.isHeavy(claim.file) ? extractionReuse : nil
+            let key = reuse == nil ? nil : ExtractionReuse.key(url,file:claim.file,cancelled:{self.claimCancelled(claim)})
+            if let key, let raw=reuse?.get(key) {
+                guard stamp(url) == before else {return (.changed,before)}
+                return (.done(raw),before)
+            }
+            guard !claimCancelled(claim) else {return (.interrupted,nil)}
+            let content=try extractor(url,{ self.claimCancelled(claim) })
+            guard !claimCancelled(claim) else {return (.interrupted,nil)}
+            guard stamp(url) == before, try FileSignature.read(url).matches(claim.file) else {return (.changed,before)}
+            let raw=try JSONEncoder().encode(content)
+            if let key, content.warning == nil {reuse?.save(raw,for:key)}
+            return (.done(raw),before)
+        } catch {
+            guard !claimCancelled(claim) else {return (.interrupted,nil)}
+            if stamp(url) != before || stamp(url) == nil {return (.changed,before)}
+            return (.failed(error.localizedDescription),before)
+        }
+    }
+
+    private func finishContent(lane: ContentLane, claim: ContentClaim, result: (ExtractionResult, ChangeStamp?)) {
+        defer { claims.removeValue(forKey:lane);wakeWork() }
+        guard !claimCancelled(claim) else {return}
+        let current=VolumeIdentity.refreshed(claim.root)
+        guard current.isOnline, current.path == claim.root.path else {
+            locked { rootsNeedRefresh=true }
+            return
+        }
+        let url=URL(fileURLWithPath:current.path).appendingPathComponent(claim.key.path)
+        do {
+            var changed=false
+            switch result.0 {
+            case .interrupted: return
+            case .changed:
+                recheckChangedContent(claim,url:url)
+                return
+            case .done(let raw):
+                guard stamp(url) == result.1 else {recheckChangedContent(claim,url:url);return}
+                changed=try locked {
+                    guard canCommit(claim) else {return false}
+                    return try database.completeContent(file:claim.file,raw:raw,requirePending:true)
+                }
+            case .failed(let message):
+                guard stamp(url) == result.1 else {recheckChangedContent(claim,url:url);return}
+                changed=try locked {
+                    guard canCommit(claim) else {return false}
+                    return try database.failPendingContent(file:claim.file,message:message)
+                }
+            }
+            if changed {
+                freshContent.removeValue(forKey:claim.key)
+                onContentChange?()
+                onChange?()
+            }
+        } catch {emit("索引遇到问题",error.localizedDescription)}
+    }
+
+    private func recheckChangedContent(_ claim: ContentClaim, url: URL) {
+        // Put the rescan ahead of another extraction attempt against the
+        // obsolete row. The scan will submit the latest stable signature.
+        let now=ProcessInfo.processInfo.systemUptime
+        freshContent[claim.key]=FreshContent(first:freshContent[claim.key]?.first ?? now,ready:now+1)
+        receiveEvents([FileChangeEvent(path:url.path)])
+    }
+
+    private func run() {
+        var more=false
+        defer {
+            let again=locked { () -> Bool in
+                running=false
+                return more || requested
+            }
+            if again {wakeWork()}
+        }
+        guard !yielding else {return}
+        do {
+            let (prefs,epoch,refresh)=locked { () -> (IndexingPreferences,UInt64,Bool) in
+                requested=false
+                let result=(preferences,contentEpoch,rootsNeedRefresh)
+                rootsNeedRefresh=false
+                return result
+            }
+            if refresh {
+                emptyContentLanes.removeAll()
+                currentRoots=try refreshRoots(preferences:prefs)
+            }
+            try processFullRequest()
+            try launchContent(preferences:prefs,epoch:epoch)
+            let eligible=currentRoots.filter { $0.enabled && $0.isOnline }
+            for offset in eligible.indices {
+                let index=(scanRootCursor+offset)%eligible.count
+                if try scanSlice(root:eligible[index],preferences:prefs) {
+                    scanRootCursor=(index+1)%eligible.count
+                    more=true
+                    break
+                }
+            }
+            try launchContent(preferences:prefs,epoch:epoch)
+            if more || !claims.isEmpty || freshContent.values.contains(where:{$0.ready > ProcessInfo.processInfo.systemUptime}) {
+                idlePublished=false
+            } else if !idlePublished && !yielding {
+                idlePublished=true
+                IndexBenchmarkTrace.active?.idle(database:database)
+                emit("索引已更新","新增或修改文件后会自动更新")
+                onChange?()
+            }
+        } catch {
+            locked { rootsNeedRefresh=true }
+            emit("索引遇到问题",error.localizedDescription)
             onChange?()
         }
-        return handled
-    }
-    private func run() {
-        let activity=ProcessInfo.processInfo.beginActivity(options:.userInitiatedAllowingIdleSystemSleep,reason:"在本机建立文件全文和图片索引")
-        defer {
-            ProcessInfo.processInfo.endActivity(activity)
-            let restart=locked { () -> Bool in
-                running=false
-                return requested && !paused && !stopped && !sleeping && !userActive && mutations == 0
-            }
-            if restart { wakeWork() }
-        }
-        do {
-            while !yielding {
-                locked { requested=false }
-                let prefs=locked { preferences }
-                let roots=try refreshRoots(preferences:prefs)
-                // Always continue an existing backlog before directory work.
-                _=try drainContent(roots:roots,preferences:prefs)
-                for root in roots where root.enabled && root.isOnline {
-                    if yielding { return }
-                    let scopes=try locked { () throws -> [String] in
-                        let active=state.roots[root.id]?.inFlight ?? []
-                        let scopes=active.isEmpty ? (state.roots[root.id]?.pending ?? []) : active
-                        if active.isEmpty {
-                            state.roots[root.id]?.pending=[]
-                            state.roots[root.id]?.inFlight=scopes
-                        } else if !(state.roots[root.id]?.pending.isEmpty ?? true) {
-                            // Drain arrivals already saved behind this cursor.
-                            // New arrivals still use the normal debounce so a
-                            // file changing during extraction cannot busy-loop.
-                            requested=true
-                        }
-                        try persistState()
-                        return scopes
-                    }
-                    for scope in scopes {
-                        if yielding { return }
-                        let options=ScanOptions(includeHidden:prefs.includeHidden,excludeDevelopmentCaches:prefs.excludeDevelopmentCaches)
-                        let saved=locked {state.roots[root.id]?.scan}
-                        let session:FileScanSession
-                        if let live=scanSessions[root.id],!live.finished,
-                           live.checkpoint.matches(root:root,scope:scope,options:options),
-                           saved?.generation == live.checkpoint.generation {session=live}
-                        else {
-                            session=try FileScanner(database:database,ignoredPaths:ignoredPaths).session(root:root,relativePath:scope,options:options,checkpoint:saved)
-                            scanSessions[root.id]=session
-                        }
-                        emit(scope.isEmpty ? "正在建立文件目录" : "正在更新文件目录",scope.isEmpty ? root.name : scope,count:session.checkpoint.count,busy:true)
-                        var contentFailure:Error?
-                        var lastCheckpointWrite=0.0
-                        let change=IndexChange(rootID:root.id,relativePaths:[scope],fullRescan:scope.isEmpty)
-                        let result=try session.advance(cancelled:{self.yielding || contentFailure != nil}) { count in
-                            do {
-                                let now=ProcessInfo.processInfo.systemUptime
-                                let finishedTraversal=session.checkpoint.currentDirectory == nil && session.checkpoint.directories.isEmpty
-                                try self.locked {
-                                    self.state.roots[root.id]?.scan=session.checkpoint
-                                    // Keep live progress per batch, but avoid
-                                    // rewriting a wide directory stack dozens
-                                    // of times a second. Suspension/completion
-                                    // always commits; a crash replays the small
-                                    // interval since the last durable checkpoint.
-                                    if now-lastCheckpointWrite >= 1 || self.stopped || self.paused || self.sleeping || self.userActive || self.mutations > 0 || finishedTraversal {
-                                        try self.persistState();lastCheckpointWrite=now
-                                    }
-                                }
-                            }
-                            catch {contentFailure=error;return}
-                            guard !self.yielding,contentFailure == nil else { return }
-                            self.emit(scope.isEmpty ? "正在建立文件目录" : "正在更新文件目录",scope.isEmpty ? root.name : scope,count:count,busy:true)
-                            // The committed ID journal makes a batch refresh
-                            // bounded even while the first whole-root scan runs.
-                            self.onIndexChange?(IndexChange(rootID:root.id,relativePaths:[scope],fullRescan:false))
-                            self.onChange?()
-                            do { _=try self.drainContent(roots:roots,preferences:prefs) } catch { contentFailure=error }
-                            if !self.yielding && contentFailure == nil {
-                                self.emit(scope.isEmpty ? "正在建立文件目录" : "正在更新文件目录",scope.isEmpty ? root.name : scope,count:count,busy:true)
-                            }
-                        }
-                        if let contentFailure { throw contentFailure }
-                        autoreleasepool { self.onIndexChange?(change);self.onChange?() }
-                        if session.finished {
-                            try locked {
-                                // Incoming events go to a separate inbox while
-                                // this scope is inFlight. A long first scan can
-                                // finish even under continuous file changes.
-                                state.roots[root.id]?.inFlight.removeAll { $0 == scope }
-                                state.roots[root.id]?.scan=nil
-                                if !result.complete {
-                                    let pending=state.roots[root.id]?.pending ?? []
-                                    state.roots[root.id]?.pending=IndexRelativePath.coalescing(pending + result.preservingPaths)
-                                }
-                                try persistState()
-                            }
-                            scanSessions.removeValue(forKey:root.id)
-                        }
-                        if !result.errors.isEmpty && !yielding { emit("部分位置无法读取",result.errors[0]) }
-                        if scope.isEmpty { locked { nextScanAfter=Date().addingTimeInterval(rescanInterval) } }
-                    }
-                }
-                if yielding { return }
-                // Drain bounded batches with a fresh autorelease pool each time.
-                // Dirty events arriving during extraction interrupt only at a
-                // batch boundary, never invalidate an otherwise valid result.
-                while !yielding {
-                    let handled=try drainContent(roots:roots,preferences:prefs)
-                    if locked({requested}) { break }
-                    if !handled {
-                        emit("索引已更新","新增或修改文件后会自动更新");onChange?();return
-                    }
-                }
-                if !locked({requested}) { return }
-            }
-        } catch { emit("索引遇到问题",error.localizedDescription);onChange?() }
     }
 }

@@ -290,6 +290,9 @@ public final class NameSearchEngine: @unchecked Sendable {
         stateLock.lock(); defer { stateLock.unlock() }
         guard version == revision else { throw NameSearchEngineError.invalidated }
         snapshot = value
+        if !immutable, let trace = IndexBenchmarkTrace.active, let revision = value.changeRevision {
+            trace.append(.init(phase: "publish", revision: revision))
+        }
     }
     private func catalogRevision(_ reader:NameMetadataReader) throws -> Int64? {
         let exists=try reader.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_state'")

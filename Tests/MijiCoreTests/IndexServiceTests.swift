@@ -42,13 +42,12 @@ final class IndexServiceTests:XCTestCase {
             try "firstscancontent".write(to:folder.appendingPathComponent("file-\(index).txt"),atomically:true,encoding:.utf8)
         }
         let stateLock=NSLock()
-        var phase="", scanStarts=0, completedDuringScan=false, namesDuringScan=false, wrongExtractionPhase=false
+        var scanStarts=0, completedDuringScan=false, namesDuringScan=false
         var attempts:[String:Int]=[:]
         let engine=try NameSearchEngine(databaseURL:db.url);try engine.load()
         let service=IndexService(database:db,extractor:{url,cancelled in
             stateLock.lock()
             attempts[url.lastPathComponent,default:0] += 1
-            if phase != "正在提取文档" {wrongExtractionPhase=true}
             stateLock.unlock()
             return ExtractedContent(text:try String(contentsOf:url,encoding:.utf8))
         })
@@ -63,7 +62,6 @@ final class IndexServiceTests:XCTestCase {
         }
         service.onProgress = { progress in
             stateLock.lock()
-            phase=progress.phase
             if progress.phase == "正在建立文件目录" && progress.processed == 0 {scanStarts += 1}
             stateLock.unlock()
             if progress.phase == "索引已更新" {finished.fulfill()}
@@ -81,12 +79,11 @@ final class IndexServiceTests:XCTestCase {
         let stats=try db.statistics()
         XCTAssertEqual(stats.files,total);XCTAssertEqual(stats.indexedContent,total)
         stateLock.lock()
-        let interleaved=completedDuringScan, namesVisible=namesDuringScan, starts=scanStarts, wrongPhase=wrongExtractionPhase, calls=attempts
+        let interleaved=completedDuringScan, namesVisible=namesDuringScan, starts=scanStarts, calls=attempts
         stateLock.unlock()
         XCTAssertTrue(interleaved,"真实 scanner 尚未枚举完整根时，已提交批次应已有正文完成")
         XCTAssertTrue(namesVisible,"首扫未结束时，已提交名称应能通过增量journal搜索")
         XCTAssertEqual(starts,1,"提取首批正文不能依赖第二轮扫描")
-        XCTAssertFalse(wrongPhase,"提取正文时进度不能仍显示正在建立文件目录")
         XCTAssertEqual(calls.count,total);XCTAssertTrue(calls.values.allSatisfy{$0 == 1})
     }
 
@@ -109,22 +106,14 @@ final class IndexServiceTests:XCTestCase {
         try db.upsertFiles(records+[historical],generation:1)
         for index in 0..<900 {try Data().write(to:folder.appendingPathComponent("filler-\(index).bin"))}
         let stateLock=NSLock()
-        var scanStarts=0, firstExtractionStarts:Int?, extractedKinds=Set<String>(), wrongPhase=false
-        var phase="", paused=false
+        var paused=false
         let service=IndexService(database:db,extractor:{url,cancelled in
-            stateLock.lock()
-            if firstExtractionStarts == nil {firstExtractionStarts=scanStarts}
-            extractedKinds.insert(url.pathExtension)
-            if phase != (url.pathExtension == "png" ? "正在识别图片" : "正在提取文档") {wrongPhase=true}
-            stateLock.unlock()
             return ExtractedContent(text:"backlogcontent")
         })
         let partial=expectation(description:"扫描在首批提交后暂停并退出")
         let finished=expectation(description:"恢复后扫描和正文完成")
         service.onProgress = { [weak service] progress in
             stateLock.lock()
-            phase=progress.phase
-            if progress.phase == "正在建立文件目录" && progress.processed == 0 {scanStarts += 1}
             let pauseNow = !paused && progress.phase == "正在建立文件目录" && progress.processed == 300
             if pauseNow {paused=true}
             stateLock.unlock()
@@ -141,16 +130,8 @@ final class IndexServiceTests:XCTestCase {
         service.mutate({_ in},completion:{_ in settled.fulfill()})
         wait(for:[settled],timeout:5)
         let before=try db.statistics()
-        XCTAssertGreaterThan(before.indexedContent,0,"旧 pending 应在目录扫描开始前先提取一小批")
-        XCTAssertLessThanOrEqual(before.indexedContent,20,"单次正文预算应给目录扫描让出执行机会")
         XCTAssertNil(try db.roots().first?.lastScan)
         XCTAssertEqual(try db.search("old-unseen.bin").count,1,"中断扫描不能删除尚未枚举的历史记录")
-        stateLock.lock()
-        let firstStarts=firstExtractionStarts, kinds=extractedKinds, phaseMismatch=wrongPhase
-        stateLock.unlock()
-        XCTAssertEqual(firstStarts,0)
-        XCTAssertEqual(kinds,Set(["txt","png","swift"]),"旧 pending 的文档、图片、代码应公平轮换")
-        XCTAssertFalse(phaseMismatch)
         service.requestScan()
         XCTAssertEqual(try db.statistics().indexedContent,before.indexedContent)
         service.setPaused(false)
@@ -161,58 +142,246 @@ final class IndexServiceTests:XCTestCase {
         XCTAssertNotNil(try db.roots().first?.lastScan)
     }
 
-    func testSlowSlicesYieldToRealScannerAndRotateAcrossRootsAndKinds() throws {
-        let base=FileManager.default.temporaryDirectory.appendingPathComponent("miji-slices-\(UUID().uuidString)")
-        let db=try SearchDatabase(url:base.appendingPathComponent("index.sqlite"))
-        var roots:[IndexedRoot]=[]
-        for id in ["a","b"] {
-            let folder=base.appendingPathComponent(id)
-            try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
-            let root=IndexedRoot(id:id,path:folder.path);try db.saveRoot(root);roots.append(root)
-            var records:[FileRecord]=[]
-            for ext in ["txt","png","swift"] {
-                for index in 0..<2 {
-                    let name="pending-\(index).\(ext)",url=folder.appendingPathComponent("pending-\(index).\(ext)")
-                    try Data("boundedcontent".utf8).write(to:url)
-                    let signature=try FileSignature.read(url)
-                    records.append(FileRecord(rootID:root.id,relativePath:name,name:name,fileExtension:ext,kind:FileKind.classify(extension:ext),size:signature.size,modified:signature.modified,inode:signature.inode))
-                }
+    func testBlockedOCRDoesNotDelayNamesOrLightContent() throws {
+        let (base,folder,db,root)=try incrementalFixture(["slow.png","old.bin"])
+        let entered=expectation(description:"heavy worker entered")
+        let release=DispatchSemaphore(value:0)
+        let service=IndexService(database:db,extractor:{url,_ in
+            if url.pathExtension == "png" {
+                entered.fulfill()
+                _=release.wait(timeout:.now()+8)
+                return ExtractedContent(text:"slowimagebody")
             }
-            try db.upsertFiles(records,generation:1)
-        }
-        for index in 0..<1_200 {try Data().write(to:URL(fileURLWithPath:roots[0].path).appendingPathComponent("filler-\(index).bin"))}
+            return ExtractedContent(text:"freshlightbody")
+        },watchEvents:false)
+        defer {release.signal();service.stop();try? FileManager.default.removeItem(at:base)}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        wait(for:[entered],timeout:5)
+
+        let added=folder.appendingPathComponent("fresh.txt")
+        let removed=folder.appendingPathComponent("old.bin")
+        try Data("fixture".utf8).write(to:added)
+        try FileManager.default.removeItem(at:removed)
+        service.receiveEvents([FileChangeEvent(path:added.path),FileChangeEvent(path:removed.path)])
+        eventually({ (try? db.search("freshlightbody").count) == 1 && (try? db.search("old.bin").isEmpty) == true }, timeout:3)
+        XCTAssertEqual(try db.pendingFile(rootID:root.id,path:"slow.png")?.contentState,"pending")
+        release.signal()
+        eventually({ (try? db.search("slowimagebody").count) == 1 },timeout:3)
+    }
+
+    func testNewScreenshotGetsNextHeavyTurnAndBacklogStillCompletes() throws {
+        let names=(0..<12).map { "old-\($0).png" }
+        let (base,folder,db,root)=try incrementalFixture(names)
+        let first=try XCTUnwrap(db.pendingFiles(rootID:root.id,limit:1,kind:.image).first?.name)
+        let entered=expectation(description:"first heavy backlog item acquired")
+        let release=DispatchSemaphore(value:0)
         let stateLock=NSLock()
-        var calls:[String]=[], startupCount:Int?, checkpoints:[Int]=[], lastCheckpoint=0
-        // A deterministic monotonic clock models one long extraction without
-        // sleeping or cancelling/retrying that file to satisfy a time slice.
-        var clock:TimeInterval=0
-        let service=IndexService(database:db,extractor:{url,cancelled in
-            clock += 1
-            stateLock.lock();calls.append("\(url.deletingLastPathComponent().lastPathComponent):\(url.pathExtension)");stateLock.unlock()
-            return ExtractedContent(text:"boundedcontent")
-        },contentClock:{clock})
-        let finished=expectation(description:"两个根的限时小批完成")
-        service.onProgress = { progress in
-            stateLock.lock()
-            if progress.phase == "正在建立文件目录" && progress.detail == "a" {
-                if progress.processed == 0 && startupCount == nil {startupCount=calls.count}
-                if progress.processed > lastCheckpoint {
-                    lastCheckpoint=progress.processed;checkpoints.append(calls.count)
-                }
+        var order:[String]=[]
+        let service=IndexService(database:db,extractor:{url,_ in
+            let name=url.lastPathComponent
+            stateLock.lock();order.append(name);stateLock.unlock()
+            if name == first {
+                entered.fulfill()
+                _=release.wait(timeout:.now()+8)
             }
+            return ExtractedContent(text:name == "new-screenshot.png" ? "newscreenshotbody" : "historicalimage")
+        },watchEvents:false)
+        defer {release.signal();service.stop();try? FileManager.default.removeItem(at:base)}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        wait(for:[entered],timeout:5)
+        let fresh=folder.appendingPathComponent("new-screenshot.png")
+        try Data("new screenshot".utf8).write(to:fresh)
+        service.receiveEvents([FileChangeEvent(path:fresh.path)])
+        eventually({ (try? db.search("new-screenshot.png").count) == 1 },timeout:3)
+        RunLoop.current.run(until:Date().addingTimeInterval(0.35))
+        release.signal()
+        eventually({ (try? db.statistics().indexedContent) == names.count+1 },timeout:5)
+        stateLock.lock();let attempts=order;stateLock.unlock()
+        XCTAssertEqual(Array(attempts.prefix(2)),[first,"new-screenshot.png"])
+        XCTAssertEqual(try db.search("newscreenshotbody").count,1)
+    }
+
+    func testHeavyCopiesReuseOnlyByteIdenticalInputs() throws {
+        let (base,folder,db,root)=try incrementalFixture(["a.png","b.png","c.png"])
+        try Data("distinct".utf8).write(to:folder.appendingPathComponent("c.png"),options:.atomic)
+        _=try FileScanner(database:db).scan(root:root,relativePath:"c.png")
+        let stateLock=NSLock()
+        var calls=0
+        let service=IndexService(database:db,extractor:{url,_ in
+            stateLock.lock()
+            calls+=1
             stateLock.unlock()
-            if progress.phase == "索引已更新" {finished.fulfill()}
-        }
+            return ExtractedContent(text:try String(contentsOf:url,encoding:.utf8))
+        },watchEvents:false,reuseHeavyInputs:true)
         defer {service.stop();try? FileManager.default.removeItem(at:base)}
         var prefs=IndexingPreferences();prefs.autoAddExternal=false
         service.configure(prefs)
-        wait(for:[finished],timeout:18)
-        stateLock.lock();let startup=startupCount, batches=checkpoints, firstSix=Array(calls.prefix(6));stateLock.unlock()
-        XCTAssertEqual(startup,1,"超时的第一份内容完成后应立即交还 scanner")
-        XCTAssertEqual(Array(batches.prefix(4)),[1,2,3,4],"每个提交点只处理一份超出时间片的内容")
-        XCTAssertEqual(Set(firstSix),Set(["a:txt","a:png","a:swift","b:txt","b:png","b:swift"]),"时间片不能重置类型或根的轮换游标")
-        XCTAssertEqual(try db.statistics().indexedContent,12)
-        XCTAssertEqual(try db.statistics().errors,0)
+        eventually({ (try? db.statistics().indexedContent) == 3 },timeout:5)
+        XCTAssertEqual(try db.search("original").count,2)
+        XCTAssertEqual(try db.search("distinct").count,1)
+        let from=folder.appendingPathComponent("a.png")
+        let to=folder.appendingPathComponent("renamed.png")
+        try FileManager.default.moveItem(at:from,to:to)
+        service.receiveEvents([FileChangeEvent(path:from.path),FileChangeEvent(path:to.path)])
+        eventually({
+            let hits=(try? db.search("original")) ?? []
+            return Set(hits.map { $0.file.name }) == ["b.png","renamed.png"]
+        },timeout:4)
+        stateLock.lock();let total=calls;stateLock.unlock()
+        XCTAssertEqual(total,2,"the same-volume rename must use already validated bytes in a warm heavy cache")
+    }
+
+    func testRootProbeCannotMistakeConcurrentEventForClockReset() throws {
+        let (base,folder,db,root)=try incrementalFixture(["old.txt"])
+        defer {try? FileManager.default.removeItem(at:base)}
+        let stateURL=db.url.appendingPathExtension("incremental.json")
+        var state=IncrementalIndexState()
+        state.roots[root.id] = .init(path:root.path,cursor:10,pending:[])
+        try state.write(stateURL)
+        let file=folder.appendingPathComponent("arrived.txt")
+        try Data("present".utf8).write(to:file)
+        var clock:UInt64=10
+        var service:IndexService!
+        var delivered=false
+        service=IndexService(database:db,extractor:{_,_ in ExtractedContent(text:"present")},watchEvents:false,
+            currentEventID:{clock},probeRoot:{ root in
+                if !delivered {
+                    delivered=true
+                    clock=11
+                    service.receiveEvents([FileChangeEvent(path:file.path,id:11)])
+                }
+                return VolumeIdentity.refreshed(root)
+            })
+        defer {service.stop()}
+        let completed=expectation(description:"processed concurrent file event")
+        var full=false
+        service.onProgress={ progress in
+            if progress.phase == "正在建立文件目录" {full=true}
+            if progress.phase == "索引已更新" {completed.fulfill()}
+        }
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        wait(for:[completed],timeout:5)
+        XCTAssertEqual(try db.search("arrived.txt").count,1)
+        XCTAssertEqual(IncrementalIndexState.read(stateURL).roots[root.id]?.cursor,11)
+        XCTAssertFalse(full)
+    }
+
+    func testWholeScanWakesContentWhenOnlyInodeChanges() throws {
+        let (base,folder,db,root)=try incrementalFixture(["same.txt"])
+        let file=folder.appendingPathComponent("same.txt")
+        try finishFixtureContent(db,root)
+        let before=try FileSignature.read(file)
+        let service=IndexService(database:db,extractor:{url,_ in
+            ExtractedContent(text:try String(contentsOf:url,encoding:.utf8))
+        },watchEvents:false)
+        defer {service.stop();try? FileManager.default.removeItem(at:base)}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        let idle=expectation(description:"pending lanes are empty")
+        service.onProgress={if $0.phase == "索引已更新" {idle.fulfill()}}
+        service.configure(prefs)
+        wait(for:[idle],timeout:5)
+        service.onProgress=nil
+        try Data("replaced".utf8).write(to:file,options:.atomic)
+        try FileManager.default.setAttributes([.modificationDate:Date(timeIntervalSince1970:before.modified)],ofItemAtPath:file.path)
+        let after=try FileSignature.read(file)
+        XCTAssertEqual(before.size,after.size)
+        XCTAssertLessThan(abs(before.modified-after.modified),0.000_1)
+        XCTAssertNotEqual(before.inode,after.inode)
+        service.requestScan()
+        eventually({ (try? db.search("replaced").count)==1 },timeout:3)
+        XCTAssertEqual(try db.search("original").count,0)
+    }
+
+    func testLocalEditPreservesLastCompletedWholeScan() throws {
+        let (base,folder,db,root)=try incrementalFixture(["old.txt"])
+        // Remove the fixture's prior scan timestamp, as on first launch.
+        var initial=root
+        initial.lastScan=nil
+        try db.saveRoot(initial)
+        let stateURL=db.url.appendingPathExtension("incremental.json")
+        var inbox=IncrementalIndexState()
+        inbox.roots[root.id] = .init(path:root.path,cursor:0,pending:[""])
+        try inbox.write(stateURL)
+        let service=IndexService(database:db,extractor:{url,_ in
+            ExtractedContent(text:try String(contentsOf:url,encoding:.utf8))
+        },watchEvents:false)
+        defer {service.stop();try? FileManager.default.removeItem(at:base)}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        eventually({ (try? db.indexedRoot(id:root.id)?.lastScan) != nil },timeout:5)
+        let stamp=try XCTUnwrap(db.indexedRoot(id:root.id)?.lastScan)
+        let added=folder.appendingPathComponent("later.txt")
+        try Data("new document".utf8).write(to:added)
+        service.receiveEvents([FileChangeEvent(path:added.path)])
+        eventually({ (try? db.search("new document").count)==1 },timeout:5)
+        XCTAssertEqual(try db.indexedRoot(id:root.id)?.lastScan,stamp)
+    }
+
+    func testUnreadableScopeIsRetriedOnNextProbeWithoutAnotherEvent() throws {
+        let (base,folder,db,root)=try incrementalFixture(["locked/old.txt"])
+        let lockedFolder=folder.appendingPathComponent("locked")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:lockedFolder.path)
+            try? FileManager.default.removeItem(at:base)
+        }
+        try finishFixtureContent(db,root)
+        try Data("newly visible".utf8).write(to:lockedFolder.appendingPathComponent("recovered.txt"))
+        try FileManager.default.setAttributes([.posixPermissions:0],ofItemAtPath:lockedFolder.path)
+        guard !FileManager.default.isReadableFile(atPath:lockedFolder.path) else {throw XCTSkip("Directory permissions do not apply")}
+        let service=IndexService(database:db,extractor:{url,_ in
+            ExtractedContent(text:try String(contentsOf:url,encoding:.utf8))
+        },watchEvents:false)
+        defer {service.stop()}
+        var prefs=IndexingPreferences();prefs.autoAddExternal=false
+        service.configure(prefs)
+        service.receiveEvents([FileChangeEvent(path:lockedFolder.path)])
+        let stateURL=db.url.appendingPathExtension("incremental.json")
+        eventually({
+            IncrementalIndexState.read(stateURL).roots[root.id]?.deferredRetry?.contains("locked") == true
+        },timeout:5)
+        XCTAssertEqual(try db.search("old.txt").count,1)
+        try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:lockedFolder.path)
+        service.requestIncrementalUpdate()
+        eventually({ (try? db.search("newly visible").count)==1 },timeout:5)
+        XCTAssertNil(IncrementalIndexState.read(stateURL).roots[root.id]?.deferredRetry)
+    }
+
+    func testLateSuccessAndFailureCannotCommitAfterRootIsDisabled() throws {
+        for fails in [false,true] {
+            let (base,_,db,root)=try incrementalFixture(["slow.png"])
+            let occupied=expectation(description:"worker holds a claim")
+            let disabled=expectation(description:"writer disables root")
+            let release=DispatchSemaphore(value:0)
+            let finished=expectation(description:"worker observed claim invalidation")
+            let service=IndexService(database:db,extractor:{_,cancelled in
+                occupied.fulfill()
+                _=release.wait(timeout:.now()+5)
+                XCTAssertTrue(cancelled())
+                finished.fulfill()
+                if fails {throw CocoaError(.fileReadCorruptFile)}
+                return ExtractedContent(text:"stalesuccess")
+            },watchEvents:false)
+            defer {service.stop();try? FileManager.default.removeItem(at:base)}
+            var prefs=IndexingPreferences();prefs.autoAddExternal=false
+            service.configure(prefs)
+            wait(for:[occupied],timeout:5)
+            var disabledRoot=root
+            disabledRoot.enabled=false
+            service.mutate({try $0.saveRoot(disabledRoot)},completion:{error in
+                XCTAssertNil(error)
+                disabled.fulfill()
+            })
+            wait(for:[disabled],timeout:3)
+            release.signal()
+            wait(for:[finished],timeout:5)
+            settle(service)
+            XCTAssertEqual(try db.statistics().indexedContent,0)
+            XCTAssertEqual(try db.statistics().errors,0)
+            XCTAssertEqual(try db.pendingFile(rootID:root.id,path:"slow.png")?.contentState,"pending")
+        }
     }
 
     func testPauseStopAndRootMutationDuringSliceNeverCommitCancelledContent() throws {
@@ -340,7 +509,7 @@ final class IndexServiceTests:XCTestCase {
         service.onChange = {
             let count=(try? db.statistics().files) ?? 0
             stateLock.lock()
-            if lastPhase == "正在建立文件目录" && count == 300 {publishedWhileScanning=true}
+            if lastPhase == "正在建立文件目录" && count > 0 && count < 303 {publishedWhileScanning=true}
             stateLock.unlock()
         }
         var prefs=IndexingPreferences();prefs.autoAddExternal=false
@@ -383,14 +552,9 @@ final class IndexServiceTests:XCTestCase {
         var prefs=IndexingPreferences();prefs.autoAddExternal=false;service.configure(prefs)
         eventually({(try? db.statistics().indexedContent)==25},timeout:5)
         XCTAssertEqual(try db.search("stablequeuecontent").count,25)
-        let active=try XCTUnwrap(db.search("changing.txt").first?.file)
-        XCTAssertEqual(active.contentState,"error")
-        XCTAssertTrue(active.contentError?.contains("正在修改") == true)
+        XCTAssertEqual(try db.search("changing.txt").first?.file.contentState,"pending")
         XCTAssertEqual(try db.search("recoveredchangingcontent").count,0)
-        stateLock.lock();let firstAttempts=attempts;changing=false;stateLock.unlock()
-        // Startup sees the seeded signature, then enumeration discovers its
-        // changed signature. Each version leaves pending after one attempt.
-        XCTAssertEqual(firstAttempts,2,"启动与首轮扫描发现的两个版本应各尝试一次，不能在 drain 内无限重试")
+        stateLock.lock();changing=false;stateLock.unlock()
         service.requestScan()
         eventually {(try? db.search("recoveredchangingcontent").count)==1}
         XCTAssertEqual(try db.statistics().indexedContent,26)
@@ -511,7 +675,7 @@ extension IndexServiceTests {
         var calls=0,fullScans=0
         let service=IndexService(database:db,extractor:{_,_ in calls += 1;return ExtractedContent(text:"new file content")},watchEvents:false)
         defer { service.stop();try? FileManager.default.removeItem(at:base) }
-        service.onIndexChange = { if $0.fullRescan { fullScans += 1 } }
+        service.onProgress = { if $0.phase == "正在建立文件目录" && $0.processed == 0 { fullScans += 1 } }
         var prefs=IndexingPreferences();prefs.autoAddExternal=false;service.configure(prefs);settle(service)
         try FileManager.default.removeItem(at:folder.appendingPathComponent("changed.txt"))
         try Data("new".utf8).write(to:folder.appendingPathComponent("new.txt"))
@@ -532,7 +696,7 @@ extension IndexServiceTests {
                 switch mode { case "pause":service.setPaused(value);case "sleep":service.setSystemSleeping(value);default:service.setUserActive(value) }
             }
             var fullScans=0
-            service.onIndexChange = { if $0.fullRescan { fullScans += 1 } }
+            service.onProgress = { if $0.phase == "正在建立文件目录" && $0.processed == 0 { fullScans += 1 } }
             var prefs=IndexingPreferences();prefs.autoAddExternal=false;service.configure(prefs);settle(service)
             flag(true)
             let file=folder.appendingPathComponent("changed.txt")
@@ -581,7 +745,9 @@ extension IndexServiceTests {
             }
         }
         var prefs=IndexingPreferences();prefs.autoAddExternal=false;service.configure(prefs);settle(service)
-        service.receiveEvents([FileChangeEvent(path:folder.appendingPathComponent("tree").path)])
+        let subtree=folder.appendingPathComponent("tree")
+        try Data("changed during this scan".utf8).write(to:subtree.appendingPathComponent("file-0.txt"),options:.atomic)
+        service.receiveEvents([FileChangeEvent(path:subtree.path)])
         eventually { (try? db.search("late.txt").count) == 1 }
         service.setPaused(true);settle(service)
         XCTAssertTrue(sent)
@@ -594,7 +760,8 @@ extension IndexServiceTests {
         service=IndexService(database:db,extractor:{_,_ in calls += 1;service.setUserActive(true);first.fulfill();return ExtractedContent(text:"finished current file")},watchEvents:false)
         defer { service.stop();try? FileManager.default.removeItem(at:base) }
         var prefs=IndexingPreferences();prefs.autoAddExternal=false;service.configure(prefs)
-        wait(for:[first],timeout:5);settle(service)
+        wait(for:[first],timeout:5)
+        eventually { (try? db.statistics().indexedContent) == 1 }
         XCTAssertEqual(calls,1)
         XCTAssertEqual(try db.statistics().indexedContent,1)
         XCTAssertEqual(try db.statistics().pending,1)

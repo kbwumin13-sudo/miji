@@ -99,40 +99,171 @@ final class SearchSchedulingTests: XCTestCase {
             if first { _ = resume.wait(timeout:.now()+5) }
         }
     }
+
+    private final class SearchAttempts: @unchecked Sendable {
+        let resume = DispatchSemaphore(value:0)
+        private let lock = NSLock()
+        private var attempts = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return attempts }
+        func begin(blocking blockedAttempt:Int? = nil) {
+            lock.lock(); attempts += 1; let current=attempts; lock.unlock()
+            if current == blockedAttempt { _=resume.wait(timeout:.now()+5) }
+        }
+    }
+
     @MainActor
-    func testContentCommittedDuringQueryRefreshesWithoutChangingQuery() async throws {
-        let directory=FileManager.default.temporaryDirectory.appendingPathComponent("miji-query-refresh-\(UUID().uuidString)")
-        let oldDirectory=ProcessInfo.processInfo.environment["MIJI_DATA_DIR"]
-        let oldAutoStart=ProcessInfo.processInfo.environment["MIJI_NO_AUTOSTART"]
-        setenv("MIJI_DATA_DIR",directory.path,1);setenv("MIJI_NO_AUTOSTART","1",1)
-        let gate=FirstSnapshotGate()
+    private func waitUntil(_ message:String,timeout:TimeInterval = 2,_ predicate:() -> Bool) async throws {
+        let deadline=Date().addingTimeInterval(timeout)
+        while !predicate() && Date() < deadline { try await Task.sleep(nanoseconds:10_000_000) }
+        XCTAssertTrue(predicate(),message)
+    }
+
+    @MainActor
+    private func withIsolatedDirectory(_ test:(URL) async throws -> Void) async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent("miji-search-refresh-\(UUID().uuidString)")
+        let oldDirectory=getenv("MIJI_DATA_DIR").map {String(cString:$0)}
+        let oldAutoStart=getenv("MIJI_NO_AUTOSTART").map {String(cString:$0)}
+        setenv("MIJI_DATA_DIR",directory.path,1)
+        setenv("MIJI_NO_AUTOSTART","1",1)
         defer {
-            gate.resume.signal()
-            if let oldDirectory{setenv("MIJI_DATA_DIR",oldDirectory,1)}else{unsetenv("MIJI_DATA_DIR")}
-            if let oldAutoStart{setenv("MIJI_NO_AUTOSTART",oldAutoStart,1)}else{unsetenv("MIJI_NO_AUTOSTART")}
+            if let oldDirectory { setenv("MIJI_DATA_DIR",oldDirectory,1) } else { unsetenv("MIJI_DATA_DIR") }
+            if let oldAutoStart { setenv("MIJI_NO_AUTOSTART",oldAutoStart,1) } else { unsetenv("MIJI_NO_AUTOSTART") }
             try? FileManager.default.removeItem(at:directory)
         }
-        let database=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
-        let root=IndexedRoot(path:directory.path);try database.saveRoot(root)
-        func record(_ name:String)->FileRecord {FileRecord(rootID:root.id,relativePath:name,name:name,fileExtension:"txt",kind:.document,size:1,modified:1,inode:1)}
-        try database.upsertFiles([record("fixture-one.txt")],generation:1)
-        let model=AppModel(searchExecutor:{ database,query,options,cancelled in
-            let snapshot=try database.search(query,options:options,cancelled:cancelled)
-            gate.holdFirst()
-            return snapshot
-        })
-        defer{model.service?.stop()}
-        for _ in 0..<60 where model.statistics.files != 1 {try await Task.sleep(nanoseconds:50_000_000)}
-        model.setSearchVisible(true);model.query="fixture"
-        for _ in 0..<60 where !gate.isCaptured {try await Task.sleep(nanoseconds:50_000_000)}
-        XCTAssertTrue(gate.isCaptured)
-        try database.upsertFiles([record("fixture-two.txt")],generation:1)
-        model.refresh()
-        for _ in 0..<60 where model.statistics.files != 2 {try await Task.sleep(nanoseconds:50_000_000)}
-        XCTAssertEqual(model.statistics.files,2);XCTAssertTrue(model.searching)
-        gate.resume.signal()
-        for _ in 0..<60 where model.hits.count != 2 {try await Task.sleep(nanoseconds:50_000_000)}
-        XCTAssertEqual(model.hits.count,2,"查询期间到达的最后一次内容刷新必须在完成后补查")
+        try await test(directory)
+    }
+
+    @MainActor
+    func testContentCommittedDuringQueryRefreshesWithoutChangingQuery() async throws {
+        try await withIsolatedDirectory { directory in
+            let gate=FirstSnapshotGate()
+            defer { gate.resume.signal() }
+            let database=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+            let root=IndexedRoot(path:directory.path);try database.saveRoot(root)
+            let names=["old.txt","new.txt"]
+            try database.upsertFiles(names.map { name in
+                FileRecord(rootID:root.id,relativePath:name,name:name,fileExtension:"txt",kind:.document,size:1,modified:1,inode:1)
+            },generation:1)
+            let pending=try database.pendingFiles(rootID:root.id)
+            let old=try XCTUnwrap(pending.first { $0.name == names[0] })
+            let new=try XCTUnwrap(pending.first { $0.name == names[1] })
+            XCTAssertTrue(try database.completeContent(file:old,content:ExtractedContent(text:"uniquefixturetoken")))
+            let model=AppModel(searchExecutor:{ database,query,options,cancelled in
+                let snapshot=try database.search(query,options:options,cancelled:cancelled)
+                gate.holdFirst()
+                return snapshot
+            })
+            model.service?.stop()
+            model.scope = .content
+            model.setSearchVisible(true);model.query="uniquefixturetoken"
+            try await waitUntil("原查询已读到提交前的正文") { gate.isCaptured }
+            let snapshot=model.currentSnapshot
+            XCTAssertTrue(try database.completeContent(file:old,content:ExtractedContent(text:"replacement")))
+            XCTAssertTrue(try database.completeContent(file:new,content:ExtractedContent(text:"uniquefixturetoken")))
+            model.service?.onContentChange?()
+            try await Task.sleep(nanoseconds:350_000_000)
+            XCTAssertTrue(model.searching)
+            gate.resume.signal()
+            try await waitUntil("静置的查询收到新命中并移除旧正文命中") { model.hits.map(\.id) == [new.id] }
+            XCTAssertEqual(model.currentSnapshot,snapshot)
+        }
+    }
+
+    @MainActor
+    func testSameFileBodyChangeRefreshesNamePreviewWithoutResettingQuery() async throws {
+        try await withIsolatedDirectory { directory in
+            let database=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+            let root=IndexedRoot(path:directory.path);try database.saveRoot(root)
+            try database.upsertFiles([FileRecord(rootID:root.id,relativePath:"report.txt",name:"report.txt",fileExtension:"txt",kind:.document,size:1,modified:1)],generation:1)
+            let file=try XCTUnwrap(database.pendingFiles(rootID:root.id).first)
+            XCTAssertTrue(try database.completeContent(file:file,content:ExtractedContent(text:"old selected body")))
+            let model=AppModel();model.service?.stop()
+            model.scope = .name; model.previewEnabled=true
+            model.setSearchVisible(true);model.query="report"
+            try await waitUntil("名称命中的原正文预览") { model.previewText.contains("old selected body") }
+            let snapshot=model.displayedSnapshot, timing=model.completedMilliseconds
+            XCTAssertTrue(try database.completeContent(file:file,content:ExtractedContent(text:"new selected body")))
+            model.service?.onContentChange?()
+            try await waitUntil("同一路径与签名的名称命中已刷新正文预览") { model.previewText.contains("new selected body") }
+            XCTAssertEqual(model.selectedID,file.id)
+            XCTAssertEqual(model.displayedSnapshot,snapshot)
+            XCTAssertEqual(model.completedMilliseconds,timing)
+        }
+    }
+
+    @MainActor
+    func testCatalogBurstPublishesNamesWhileBodySearchWaitsAndPreservesSelection() async throws {
+        try await withIsolatedDirectory { directory in
+            let attempts=SearchAttempts()
+            defer { attempts.resume.signal() }
+            let database=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+            let root=IndexedRoot(path:directory.path);try database.saveRoot(root)
+            func record(_ name:String)->FileRecord {
+                FileRecord(rootID:root.id,relativePath:name,name:name,fileExtension:"txt",kind:.document,size:1,modified:1,inode:1)
+            }
+            try database.upsertFiles([record("body.txt")],generation:1)
+            let body=try XCTUnwrap(database.pendingFiles(rootID:root.id).first)
+            XCTAssertTrue(try database.completeContent(file:body,content:ExtractedContent(text:"needle body is already visible")))
+            let model=AppModel(supplementaryExecutor:{ database,query,options,cancelled in
+                attempts.begin(blocking:2)
+                return try database.searchSupplementary(query,options:options,cancelled:cancelled)
+            })
+            model.service?.stop()
+            model.previewEnabled=true
+            model.setSearchVisible(true);model.query="needle"
+            try await waitUntil("首轮正文与预览均已完成") { !model.searching && !model.previewText.isEmpty }
+            let selected=try XCTUnwrap(model.selected)
+            let snapshot=model.displayedSnapshot, timing=model.completedMilliseconds, preview=model.previewText
+            let newName="needle-new.txt"
+            try database.upsertFiles([record(newName)],generation:1)
+            for _ in 0..<8 {
+                model.service?.onIndexChange?(IndexChange(rootID:root.id,relativePaths:[newName],fullRescan:false))
+                model.service?.onContentChange?()
+            }
+            try await waitUntil("自动刷新中的文件名首屏已更新") {
+                attempts.count == 2 && model.hits.contains { $0.file.name == newName }
+            }
+            XCTAssertEqual(model.searchPhase,.complete)
+            XCTAssertEqual(model.displayedSnapshot,snapshot)
+            XCTAssertEqual(model.completedMilliseconds,timing)
+            XCTAssertEqual(model.selectedID,selected.id)
+            XCTAssertEqual(model.previewText,preview)
+            XCTAssertTrue(model.validateResult(selected,for:.copyPath,snapshot:snapshot))
+            attempts.resume.signal()
+            try await Task.sleep(nanoseconds:350_000_000)
+            XCTAssertEqual(attempts.count,2,"一个提交窗口只补查一次")
+            model.setSearchVisible(false)
+            let hiddenName="needle-hidden.txt"
+            try database.upsertFiles([record(hiddenName)],generation:1)
+            model.service?.onIndexChange?(IndexChange(rootID:root.id,relativePaths:[hiddenName],fullRescan:false))
+            try await Task.sleep(nanoseconds:350_000_000)
+            XCTAssertEqual(attempts.count,2)
+            XCTAssertFalse(model.hits.contains { $0.file.name == hiddenName })
+            model.setSearchVisible(true)
+            try await waitUntil("重新显示时读取隐藏期间提交的索引") {
+                attempts.count == 3 && model.hits.contains { $0.file.name == hiddenName }
+            }
+        }
+    }
+
+    @MainActor
+    func testStatisticsNotifyWithoutSchedulingAnotherVisibleQuery() async throws {
+        try await withIsolatedDirectory { directory in
+            let attempts=SearchAttempts()
+            let database=try SearchDatabase(url:directory.appendingPathComponent("index.sqlite"))
+            let root=IndexedRoot(path:directory.path);try database.saveRoot(root)
+            let model=AppModel(searchExecutor:{ _,_,_,_ in attempts.begin(); return [] })
+            model.service?.stop()
+            model.setSearchVisible(true);model.query="needle"
+            try await waitUntil("用户查询已完成") { model.searchPhase == .complete }
+            let snapshot=model.displayedSnapshot
+            try database.upsertFiles([FileRecord(rootID:root.id,relativePath:"extra.txt",name:"extra.txt",fileExtension:"txt",kind:.document,size:1,modified:1)],generation:1)
+            for _ in 0..<8 { model.service?.onChange?() }
+            try await waitUntil("统计通知更新计数",timeout:3) { model.statistics.files == 1 }
+            try await Task.sleep(nanoseconds:100_000_000)
+            XCTAssertEqual(attempts.count,1)
+            XCTAssertEqual(model.displayedSnapshot,snapshot)
+        }
     }
     @MainActor
     func testEmptyQueryDoesNotPopulateHiddenResults() async throws {

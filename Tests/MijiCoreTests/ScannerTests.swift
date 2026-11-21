@@ -203,6 +203,175 @@ final class ScannerTests:XCTestCase {
 }
 
 extension ScannerTests {
+    func testSliceBudgetCountsHiddenAndSymlinkEntries() throws {
+        for name in [".hidden-one", ".hidden-two"] {
+            try Data().write(to: folder.appendingPathComponent(name))
+        }
+        for name in ["link-one", "link-two"] {
+            try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent(name), withDestinationURL: folder)
+        }
+        let finderHidden = folder.appendingPathComponent("finder-hidden.txt")
+        try Data().write(to: finderHidden)
+        XCTAssertEqual(chflags(finderHidden.path, UInt32(UF_HIDDEN)), 0)
+        let root = try VolumeIdentity.root(for: folder)
+        let session = try FileScanner(database: database).session(
+            root: root, relativePath: "", options: ScanOptions(includeHidden: false)
+        )
+        let yielded = try session.advance(cancelled: { false }, shouldYield: { true }, progress: { _ in })
+        XCTAssertFalse(yielded.complete)
+        XCTAssertFalse(session.checkpoint.started)
+        for _ in 0..<5 {
+            let slice = try session.advance(cancelled: { false }, maximumItems: 1, progress: { _ in })
+            XCTAssertFalse(slice.complete)
+            XCTAssertEqual(slice.count, 0)
+            XCTAssertEqual(session.checkpoint.currentDirectory, "")
+        }
+        let final = try session.advance(cancelled: { false }, maximumItems: 1, progress: { _ in })
+        XCTAssertTrue(final.complete)
+        XCTAssertEqual(final.count, 0)
+    }
+
+    func testYieldAfterTraversalDefersPruningUntilNextAdvance() throws {
+        let obsolete = folder.appendingPathComponent("obsolete.txt")
+        try Data().write(to: obsolete)
+        let root = try VolumeIdentity.root(for: folder)
+        let scanner = FileScanner(database: database)
+        XCTAssertTrue(try scanner.scan(root: root).complete)
+        try FileManager.default.removeItem(at: obsolete)
+
+        let session = try scanner.session(root: root, relativePath: "", options: ScanOptions())
+        var yield = false
+        let partial = try session.advance(cancelled: { false }, shouldYield: { yield }) { _ in yield = true }
+        XCTAssertFalse(partial.complete)
+        XCTAssertEqual(try database.search("obsolete.txt").count, 1)
+        XCTAssertTrue(try session.advance(cancelled: { false }, progress: { _ in }).complete)
+        XCTAssertTrue(try database.search("obsolete.txt").isEmpty)
+    }
+
+    func testOnlyNewPendingWorkAdvancesEligibilityRevision() throws {
+        let document = folder.appendingPathComponent("regular.txt")
+        try Data("original content".utf8).write(to: document)
+        try Data().write(to: folder.appendingPathComponent("skipped.bin"))
+        let root = try VolumeIdentity.root(for: folder)
+        let scanner = FileScanner(database: database)
+        let first = try scanner.session(root: root, relativePath: "", options: ScanOptions())
+        XCTAssertTrue(try first.advance(cancelled: { false }, progress: { _ in }).complete)
+        XCTAssertEqual(first.contentEligibilityRevision, 1)
+        let pending = try XCTUnwrap(database.pendingFiles(rootID: root.id).first)
+        XCTAssertTrue(try FileSignature.read(document).matches(pending))
+
+        let unchanged = try scanner.session(root: root, relativePath: "", options: ScanOptions())
+        XCTAssertTrue(try unchanged.advance(cancelled: { false }, progress: { _ in }).complete)
+        XCTAssertEqual(unchanged.contentEligibilityRevision, 0)
+
+        try Data("replacement content".utf8).write(to: document)
+        let replacement = try scanner.session(root: root, relativePath: "", options: ScanOptions())
+        XCTAssertTrue(try replacement.advance(cancelled: { false }, progress: { _ in }).complete)
+        XCTAssertEqual(replacement.contentEligibilityRevision, 1)
+    }
+
+    func testReconciledPathsSurviveResumeAndProtectTheirFreshGenerations() throws {
+        let tree = folder.appendingPathComponent("tree")
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        let obsolete = tree.appendingPathComponent("obsolete.txt")
+        let sibling = folder.appendingPathComponent("tree-sibling.txt")
+        for url in [obsolete, sibling] { try Data().write(to: url) }
+        let root = try VolumeIdentity.root(for: folder)
+        let scanner = FileScanner(database: database)
+        XCTAssertTrue(try scanner.scan(root: root).complete)
+        try FileManager.default.removeItem(at: sibling)
+
+        let whole = try scanner.session(root: root, relativePath: "", options: ScanOptions())
+        let slice = try whole.advance(cancelled: { false }, maximumItems: 1, progress: { _ in })
+        XCTAssertFalse(slice.complete)
+        XCTAssertEqual(whole.checkpoint.currentDirectory, "")
+        XCTAssertEqual(whole.checkpoint.directories, ["tree"])
+        XCTAssertEqual(try database.search("tree-sibling.txt").count, 1)
+
+        try FileManager.default.removeItem(at: obsolete)
+        try Data().write(to: tree.appendingPathComponent("updated-child.txt"))
+        try Data().write(to: folder.appendingPathComponent("updated-top.txt"))
+        whole.preserveReconciledScope("tree")
+        whole.preserveReconciledScope("updated-top.txt")
+        let encoded = try JSONEncoder().encode(whole.checkpoint)
+        for path in ["tree", "updated-top.txt"] {
+            let local = try scanner.session(root: root, relativePath: path, options: ScanOptions())
+            XCTAssertNotEqual(local.checkpoint.generation, whole.checkpoint.generation)
+            XCTAssertTrue(try local.advance(cancelled: { false }, progress: { _ in }).complete)
+        }
+
+        let saved = try JSONDecoder().decode(FileScanCheckpoint.self, from: encoded)
+        XCTAssertEqual(saved.reconciledPaths, ["tree", "updated-top.txt"])
+        let resumed = try scanner.session(root: root, relativePath: "", options: ScanOptions(), checkpoint: saved)
+        let complete = try resumed.advance(cancelled: { false }, progress: { _ in })
+        XCTAssertTrue(complete.complete)
+        XCTAssertEqual(complete.count, slice.count)
+        XCTAssertTrue(complete.preservingPaths.isEmpty)
+        XCTAssertEqual(try database.search("updated-child.txt").map { $0.file.relativePath }, ["tree/updated-child.txt"])
+        XCTAssertEqual(try database.search("updated-top.txt").map { $0.file.relativePath }, ["updated-top.txt"])
+        XCTAssertTrue(try database.search("obsolete.txt").isEmpty)
+        XCTAssertTrue(try database.search("tree-sibling.txt").isEmpty)
+    }
+
+    func testPreservingAnActiveDirectoryDiscardsItsEnumerator() throws {
+        let tree = folder.appendingPathComponent("tree")
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        for name in ["first.txt", "second.txt"] { try Data().write(to: tree.appendingPathComponent(name)) }
+        let root = try VolumeIdentity.root(for: folder)
+        let scanner = FileScanner(database: database)
+        let whole = try scanner.session(root: root, relativePath: "", options: ScanOptions())
+        let slice = try whole.advance(cancelled: { false }, maximumItems: 2, progress: { _ in })
+        XCTAssertEqual(whole.checkpoint.currentDirectory, "tree")
+        XCTAssertEqual(slice.count, 2)
+
+        whole.preserveReconciledScope("tree")
+        XCTAssertNil(whole.checkpoint.currentDirectory)
+        XCTAssertTrue(try scanner.scan(root: root, relativePath: "tree").complete)
+        let complete = try whole.advance(cancelled: { false }, progress: { _ in })
+        XCTAssertTrue(complete.complete)
+        XCTAssertEqual(complete.count, slice.count)
+        XCTAssertEqual(try database.statistics().files, 3)
+    }
+
+    func testCheckpointWithoutReconciledPathsStillDecodes() throws {
+        let root = try VolumeIdentity.root(for: folder)
+        let scanner = FileScanner(database: database)
+        let session = try scanner.session(root: root, relativePath: "", options: ScanOptions())
+        let encoded = try JSONEncoder().encode(session.checkpoint)
+        var old = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        old.removeValue(forKey: "reconciledPaths")
+        let legacy = try JSONSerialization.data(withJSONObject: old)
+        XCTAssertEqual(try JSONDecoder().decode(FileScanCheckpoint.self, from: legacy), session.checkpoint)
+    }
+
+    func testScopedScanDoesNotPruneAfterRootPathChangesDuringFinalFlush() throws {
+        let tree = folder.appendingPathComponent("tree")
+        let replacement = temporary.appendingPathComponent("replacement")
+        for directory in [tree, replacement] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let missing = tree.appendingPathComponent("missingleaf.txt")
+        try Data().write(to: missing)
+        let root = try VolumeIdentity.root(for: folder)
+        let scanner = FileScanner(database: database)
+        XCTAssertTrue(try scanner.scan(root: root).complete)
+        try FileManager.default.removeItem(at: missing)
+
+        let scoped = try scanner.session(root: root, relativePath: "tree", options: ScanOptions())
+        var moveResult: Result<Void, Error>?
+        let result = try scoped.advance(cancelled: { false }) { _ in
+            moveResult = Result {
+                let moved = self.temporary.appendingPathComponent("moved")
+                try FileManager.default.moveItem(at: self.folder, to: moved)
+                try FileManager.default.createSymbolicLink(at: self.folder, withDestinationURL: replacement)
+            }
+        }
+        try XCTUnwrap(moveResult).get()
+        XCTAssertFalse(result.complete)
+        XCTAssertFalse(scoped.finished)
+        XCTAssertEqual(try database.search("missingleaf.txt").count, 1)
+    }
+
     func testScopedScanPrunesOnlyItsSubtreeAndKeepsDoneSiblings() throws {
         let root=try VolumeIdentity.root(for:folder)
         for name in ["tree/gone.txt","tree/keep.txt","tree-other/sibling.txt"] {

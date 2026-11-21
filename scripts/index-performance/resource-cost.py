@@ -108,13 +108,31 @@ class ResourceWorkload(Workload):
             self.settle()
             with (self.output / 'resource-phases.jsonl').open('w') as raw:
                 self.record_phase('idle', raw)
+                storm_start = self.counters()
                 self.record_phase('event_storm', raw, lambda tick: write_event(event_paths[tick], tick))
                 drain_start = time.monotonic()
-                self.wait('all burst paths visible', lambda: self.reader.execute(
-                    "SELECT count(*) FROM files WHERE root_id=? AND relative_path>=? AND relative_path<?",
-                    (self.root_id, 'zzmijiresource', 'zzmijiresourcf')).fetchone()[0] == len(event_paths))
+                expected_sizes = [
+                    (path.name, len(str(tick + 3) * 4) if tick + 3 < len(event_paths) else len(str(tick)))
+                    for tick, path in enumerate(event_paths)
+                ]
+                def all_changes_committed():
+                    rows = self.reader.execute(
+                        """SELECT relative_path,size FROM files
+                           WHERE root_id=? AND relative_path>=? AND relative_path<? ORDER BY relative_path""",
+                        (self.root_id, 'zzmijiresource', 'zzmijiresourcf')).fetchall()
+                    return rows == expected_sizes
+                self.wait('all created and overwritten paths visible with final sizes', all_changes_committed)
+                self.report['final_burst_sizes_match'] = True
                 self.report['storm_visibility_drain_seconds'] = time.monotonic() - drain_start
                 self.settle()
+                storm_end = self.counters()
+                self.report['storm_and_drain'] = {
+                    'seconds': (storm_end['uptime_ns'] - storm_start['uptime_ns']) / 1e9,
+                    'delta': {key: storm_end['counters'][key] - value
+                              for key, value in storm_start['counters'].items()},
+                }
+                for boundary, sample in [('start', storm_start), ('settled', storm_end)]:
+                    raw.write(json.dumps({'phase': 'storm_and_drain', 'boundary': boundary, **sample}) + '\n')
                 self.record_phase('after_drain', raw)
             self.report['terminal_records'] = self.reader.execute('SELECT count(*) FROM files').fetchone()[0]
             self.check('correct number of indexed rows after the storm',
@@ -149,6 +167,13 @@ def summary(runs):
                     **{name: [p['delta'][name] for p in phases] for name in phases[0]['delta']},
                 }.items()
             }
+        totals = [run['storm_and_drain'] for run in group]
+        series = {'seconds': [window['seconds'] for window in totals]}
+        series.update({key: [window['delta'][key] for window in totals] for key in totals[0]['delta']})
+        metrics[label]['storm_and_drain'] = {
+            name: {'median': median(values), 'range': [min(values), max(values)]}
+            for name, values in series.items()
+        }
     return metrics
 
 
@@ -163,6 +188,8 @@ def main():
     parser.add_argument('--workload', default='names-100000')
     parser.add_argument('--variant', action='append', choices=['old-1000ms','candidate-1000ms','candidate-500ms'])
     args = parser.parse_args()
+    if args.rounds < 1 or not 1 <= args.seconds <= 120:
+        parser.error('rounds must be positive and seconds must be between 1 and 120')
     root = args.workbench.resolve()
     if not root.is_relative_to('/private/tmp') or Path(args.run_name).name != args.run_name:
         parser.error('an isolated /private/tmp workbench and simple run name are required')

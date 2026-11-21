@@ -88,7 +88,7 @@ def source_paths(number: int) -> tuple[str, str]:
     return f'{QUERY}{number:03d}a.dat', f'{QUERY}{number:03d}r.dat'
 
 
-def join_stages(records: list[dict], root: Path, change: dict) -> list[dict] | None:
+def join_stages(records: list[dict], root: Path, change: dict) -> dict | None:
     """A rename joins both the committed destination and the pruned source."""
     started = change['operation_completed_uptime_ns']
     event_map = {}
@@ -217,6 +217,7 @@ class Million(Workload):
             clock = [change['operation_completed_uptime_ns'], stages['event_received_uptime_ns'],
                      stages['database_committed_uptime_ns'], stages['name_published_uptime_ns'], ax_visible]
             row = {**change, **stages, 'ax_visible_uptime_ns': ax_visible, 'ax_polls': observed['polls'],
+                   'ax_before_name_publish': clock[4] < clock[3],
                    'latency_ms': {metric: (clock[end] - clock[start]) / 1e6
                                   for metric, start, end in (
                                       ('operation_to_event', 0, 1), ('event_to_commit', 1, 2),
@@ -225,13 +226,14 @@ class Million(Workload):
                                       ('operation_to_ax', 0, 4))}}
             write_row(transitions, row)
             self.transitions.append(row)
-            self.check('operation, FSEvents, SQLite commit, publish and AX timestamps are ordered',
-                       clock == sorted(clock), operation=change['operation'], clock=clock)
+            self.check('operation, FSEvents and SQLite are ordered; both name publication and AX follow the commit',
+                       clock[:4] == sorted(clock[:4]) and ax_visible >= clock[2],
+                       operation=change['operation'], clock=clock)
             for effect in ('present', 'absent'):
                 name = change['condition'].get(effect)
                 if name is not None:
                     self.check('committed SQLite state matches observed AX rows', bool(self.file(name)) == (effect == 'present'),
-                               operation=change['operation'], effect=effect, name=name)
+                               operation=change['operation'], effect=effect, filename=name)
         print(self.label, phase, number, 'AX ms',
               [round(row['latency_ms']['operation_to_ax']) for row in self.transitions[-3:]], flush=True)
         last_commit = max(row['database_committed_uptime_ns'] for row in joined)
@@ -276,6 +278,12 @@ class Million(Workload):
                 idle = self.batch('just_after_scan', 1, scan['uptime_ns'], mutations, transitions)
                 windows['just_after_scan'] = [scan['uptime_ns'], now_ns()]
                 self.report['after_first_batch_idle_uptime_ns'] = idle
+                self.report['initial_scan_followup'] = {
+                    phase: next((row for row in self.trace.records
+                                 if row['phase'] == phase and row['uptime_ns'] >= scan['uptime_ns']
+                                 and row.get('revision', -1) >= scan['revision']), None)
+                    for phase in ('idle', 'publish')
+                }
                 if self.stable_batches:
                     time.sleep(self.args.settle_seconds)
                     quiet_start = now_ns()
@@ -337,6 +345,7 @@ def summarize(rows):
                 continue
             stats[phase][operation] = {'independent_trial_batches': len(samples),
                                        'cold_launches': len({row['trial'] for row in samples}),
+                                       'ax_before_name_publish': sum(row['ax_before_name_publish'] for row in samples),
                                        'metrics_ms': {}}
             for key in samples[0]['latency_ms']:
                 values = sorted(row['latency_ms'][key] for row in samples)
@@ -355,6 +364,7 @@ def main():
     parser.add_argument('--gui-probe', required=True, type=Path)
     parser.add_argument('--watcher-ms', choices=(500, 1000), type=int, required=True)
     parser.add_argument('--cold-runs', type=int, default=2)
+    parser.add_argument('--append', action='store_true', help='Add otherwise identical cold launches to this variant')
     parser.add_argument('--stable-batches', type=int, default=20)
     parser.add_argument('--scan-timeout', type=float, default=150)
     parser.add_argument('--transition-timeout', type=float, default=15)
@@ -391,20 +401,36 @@ def main():
     with (workspace / f'.{args.fixture}.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = workspace / args.variant
-        result.mkdir()
-        report = {'source': args.source, 'app': str(args.app), 'executable_sha256': digest, 'fixture': fixture,
-                  'requested_watcher_ms': args.watcher_ms, 'configured_cold_runs': args.cold_runs,
-                  'configured_stable_batches': args.stable_batches, 'sample_interval_seconds': SAMPLE_INTERVAL,
-                  'clock_calibration_uptime_ns': [before, observed, after], 'mach_timebase': mach_timebase(),
-                  'system': command(['sw_vers']).strip(),
-                  'hardware': command(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']).split(),
-                  'runs': []}
+        configuration = {'source': args.source, 'app': str(args.app), 'executable_sha256': digest, 'fixture': fixture,
+                         'gui_probe_sha256': command(['shasum', '-a', '256', args.gui_probe]).split()[0],
+                         'requested_watcher_ms': args.watcher_ms, 'sample_interval_seconds': SAMPLE_INTERVAL,
+                         'immediate_limit_ms': args.immediate_ms, 'idle_seconds': args.idle_seconds,
+                         'settle_seconds': args.settle_seconds, 'mach_timebase': mach_timebase(),
+                         'system': command(['sw_vers']).strip(),
+                         'hardware': command(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']).split()}
         rows = []
+        if args.append:
+            report = json.loads((result / 'result.json').read_text())
+            mismatches = [key for key, value in configuration.items() if report.get(key) != value]
+            if mismatches:
+                parser.error('cannot combine different benchmark configurations: ' + ', '.join(mismatches))
+            for run in report['runs']:
+                if run['status'] == 'passed':
+                    trace = (result / run['path'] / 'transitions.jsonl').read_text()
+                    rows.extend(json.loads(line) for line in trace.splitlines())
+        else:
+            result.mkdir()
+            report = {**configuration, 'configured_cold_runs': 0, 'configured_stable_batches': 0,
+                      'clock_calibrations_uptime_ns': [], 'runs': []}
+        report['clock_calibrations_uptime_ns'].append([before, observed, after])
+        report['configured_cold_runs'] += args.cold_runs
+        report['configured_stable_batches'] += args.stable_batches
+        first_repeat = len(report['runs']) + 1
         try:
-            for repeat in range(1, args.cold_runs + 1):
-                output = result / f'cold-{repeat:02d}'
+            for repeat in range(args.cold_runs):
+                output = result / f'cold-{first_repeat + repeat:02d}'
                 output.mkdir()
-                count = args.stable_batches if repeat == args.cold_runs else 0
+                count = args.stable_batches if repeat == args.cold_runs - 1 else 0
                 workload = Million(output, fixture, args.app, args, count, digest)
                 try:
                     workload.run()
@@ -418,7 +444,8 @@ def main():
                     return 1
                 finally:
                     save_json(output / 'result.json', workload.report)
-                    report['runs'].append({'path': output.name, 'status': 'error' if 'error' in workload.report else 'passed'})
+                    report['runs'].append({'path': output.name, 'stable_batches': count,
+                                           'status': 'error' if 'error' in workload.report else 'passed'})
         finally:
             report['timings'] = summarize(rows)
             save_json(result / 'result.json', report)

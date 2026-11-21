@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure three alternating pairs on the frozen eight-round OCR fixture."""
+"""Measure three alternating pairs on the frozen eight-round fixture's unique media."""
 from __future__ import annotations
 
 import argparse
@@ -69,6 +69,12 @@ def binary_hashes(app: Path) -> dict[str, str]:
     return {name: sha(app / 'Contents/MacOS' / name) for name in EXECUTABLES}
 
 
+def verify_timed_fixture(root: Path, hashes: dict, excluded: list[str]) -> None:
+    if ({path: sha(root / path) for path in hashes} != hashes
+            or any((root / path).exists() for path in excluded)):
+        raise ValueError('isolated input bytes or excluded duplicate paths changed')
+
+
 class PairedWorkload(Workload):
     def observe_media(self):
         try:
@@ -81,11 +87,13 @@ class PairedWorkload(Workload):
                                 reader = reader or sqlite3.connect(self.db.as_uri() + '?mode=ro', uri=True,
                                                                    timeout=0.025)
                                 rows = reader.execute("""
-                                    SELECT relative_path, content_state FROM files
+                                    SELECT relative_path, content_state, content_error FROM files
                                     WHERE extension IN ('png', 'pdf') AND relative_path LIKE 'mix-%/%'
                                 """).fetchall()
                                 observed = time.monotonic() - self.started
-                                log.write(json.dumps({'seconds': observed, 'states': dict(rows)},
+                                log.write(json.dumps({'seconds': observed,
+                                                     'states': {path: state for path, state, _ in rows},
+                                                     'errors': {path: error for path, _, error in rows if error}},
                                                      ensure_ascii=False) + '\n')
                             except sqlite3.OperationalError as error:
                                 if not any(term in str(error) for term in ('locked', 'no such table', 'unable to open')):
@@ -165,8 +173,7 @@ def measurement_stats(pairs: list[dict]) -> dict:
     def stats(values):
         return {'median': median(values), 'min': min(values), 'max': max(values), 'values': values}
 
-    complete = [pair['runs'] for pair in pairs if len(pair['runs']) == 2
-                and all(run['status'] == 'passed' for run in pair['runs'].values())]
+    complete = [pair['runs'] for pair in pairs if pair.get('media_quality_differences') == []]
     if not complete:
         return {}
     result = {}
@@ -209,10 +216,6 @@ def run_one(workspace: Path, destination: Path, fixture: dict, cohorts: dict, ap
             serials = [line for line in text.splitlines() if line.startswith('Synthetic benchmark specimen ')]
             if serials != ([f'Synthetic benchmark specimen {turn}'] if 1 <= turn <= 6 else []):
                 raise ValueError(f'indexed serial differs from the authored fixture: {path}')
-        for kind in MEDIA.values():
-            first, copy = cohorts[f'{kind}_duplicate_members']
-            if quality[first] != quality[copy]:
-                raise ValueError(f'duplicate media have different indexed outputs: {first}, {copy}')
         run['metrics'] = media_milestones(staging / 'media-commits.jsonl', cohorts)
         run['metrics']['content_queue_drained_observed'] = (
             workload.report['timings_seconds']['content_queue_drained_observed'])
@@ -224,7 +227,7 @@ def run_one(workspace: Path, destination: Path, fixture: dict, cohorts: dict, ap
         workload.report['error'] = run['error']
         print(destination.name, run['error'], flush=True)
         if isinstance(error, KeyboardInterrupt):
-            raise
+            run['interrupted'] = True
     finally:
         for name in ('app.log', 'lsof.txt', 'media-commits.jsonl', 'resources.jsonl'):
             if (staging / name).is_file():
@@ -243,14 +246,25 @@ def main() -> int:
         parser.add_argument(f'--{variant}-source', required=True)
         parser.add_argument(f'--{variant}-sha256', nargs=2, metavar=('MAIN', 'HELPER'), required=True)
     parser.add_argument('--timeout', type=float, default=600)
+    parser.add_argument('--resume', action='store_true', help='Keep finished pairs and replay incomplete pairs')
+    parser.add_argument('--max-pairs', type=int, default=len(ORDER), help='Maximum new pair attempts in this session')
     args = parser.parse_args()
+    if args.max_pairs < 1:
+        parser.error('--max-pairs must be positive')
     manifest = json.loads(args.fixture_manifest.read_text())
     fixture = manifest['workloads'][LABEL]
     frozen = Path(fixture['path']).resolve()
     workspace = Path(manifest['workspace']).resolve()
     if not workspace.is_relative_to(Path('/private/tmp')) or frozen != workspace / 'roots' / LABEL:
         parser.error('the frozen corpus must be the isolated mixed-distinct fixture under /private/tmp')
-    paths, cohorts = inspect_fixture(frozen, fixture)
+    frozen_hashes, frozen_cohorts = inspect_fixture(frozen, fixture)
+    excluded = sorted(frozen_cohorts[f'{kind}_duplicate_members'][1] for kind in MEDIA.values())
+    paths = {path: digest for path, digest in frozen_hashes.items() if path not in excluded}
+    cohorts = {name.replace('_singletons', '_original_singletons'): sorted(set(members) - set(excluded))
+               for name, members in frozen_cohorts.items() if not name.endswith('_duplicate_members')}
+    cohorts['all_media'] = sorted(cohorts['ocr'] + cohorts['vector_pdf'])
+    if len({paths[path] for path in cohorts['all_media']}) != len(cohorts['all_media']):
+        raise ValueError('the timed PNG and PDF input must be byte-distinct')
     apps = {variant: getattr(args, variant + '_app').resolve() for variant in ('baseline', 'candidate')}
     builds = {}
     for variant, app in apps.items():
@@ -263,64 +277,104 @@ def main() -> int:
         builds[variant] = {'app': str(app), 'source': getattr(args, variant + '_source'), 'sha256': expected}
 
     output = args.output.resolve()
-    output.mkdir(parents=True)
     report_path = output / 'report.json'
-    report = {'status': 'running', 'started_utc': datetime.now(timezone.utc).isoformat(),
+    metadata = {
               'system': command(['sw_vers']).strip(), 'hardware': command(
                   ['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']).split(),
               'mach_timebase': mach_timebase(), 'sample_interval_seconds': INTERVAL,
               'fixture_manifest': str(args.fixture_manifest.resolve()),
               'fixture_manifest_sha256': sha(args.fixture_manifest), 'frozen_root': str(frozen),
-              'authored_payload_sha256': paths, 'cohorts': cohorts, 'builds': builds,
-              'order': ORDER, 'pairs': [],
+              'frozen_payload_sha256': frozen_hashes, 'timed_payload_sha256': paths,
+              'omitted_frozen_copy_paths': excluded, 'cohorts': cohorts, 'builds': builds,
+              'order': [list(variants) for variants in ORDER],
               'method': [
                   'Six serial launches in AB/BA/AB order. Each uses a fresh app process, test bundle ID and empty data directory.',
-                  'All rounds use the same temporary clone of the existing fixture. Mutation witnesses are reset by the existing harness.',
+                  'All rounds use the same temporary clone. The second byte-identical copy of each PNG, scanned PDF and vector PDF is removed. All other authored sample bytes are kept.',
                   'Default OCR, image classification and extraction reuse. The runner removes inherited MIJI_* overrides.',
                   'App-local reuse starts empty each run. Dataset hashing reads the input, and macOS file, Vision and system caches are neither flushed nor controlled.',
                   'Milestones are launch-to-observed SQLite commits, including startup and scheduling. Media polling is roughly 250 ms.',
-                  'The singleton cohort excludes both members of each duplicate group. It is still measured inside the mixed workload.',
+                  'Timed media comprise 7 unique PNGs, 7 unique scanned PDFs and 7 unique vector PDFs. The original-singletons cohorts also exclude the retained originals from the three duplicate groups.',
+                  'The OCR milestones are measured inside the mixed workload and exclude the vector PDFs. The other document formats retain their original duplicate samples.',
                   'The overall milestone is the harness queue-drained observation after its backlog mutation checks.',
                   'Indexed-media comparisons include decoded OCR text, labels, warnings, page counts and page locations.',
               ]}
+    if args.resume:
+        report = json.loads(report_path.read_text())
+        for key, value in metadata.items():
+            if key != 'method' and report.get(key) != value:
+                parser.error(f'existing report differs from current measurement inputs: {key}')
+        report['method'] = metadata['method']
+        if 'benchmark_windows' not in report:
+            report['benchmark_windows'] = [{key: report[key] for key in (
+                'started_utc', 'finished_utc', 'status', 'error') if key in report}]
+    else:
+        output.mkdir(parents=True)
+        report = {**metadata, 'started_utc': datetime.now(timezone.utc).isoformat(), 'pairs': []}
+    window = {'started_utc': datetime.now(timezone.utc).isoformat()}
+    report.setdefault('benchmark_windows', []).append(window)
+    report.pop('finished_utc', None)
+    report.pop('error', None)
+    report['status'] = 'running'
+    completed = {pair['number'] for pair in report['pairs'] if pair.get('media_quality_differences') == []}
+    attempts = Counter(pair['number'] for pair in report['pairs'])
+    remaining = [(number, variants) for number, variants in enumerate(ORDER, 1) if number not in completed]
     save_json(report_path, report)
     try:
         with tempfile.TemporaryDirectory(prefix='miji-ocr-pairs-', dir='/private/tmp') as directory:
             working = Path(directory)
             root = working / 'roots' / LABEL
             shutil.copytree(frozen, root)
-            fixture = {**fixture, 'path': str(root)}
-            if inspect_fixture(root, fixture)[0] != paths:
-                raise ValueError('fixture copy differs from the frozen payloads')
-            for number, variants in enumerate(ORDER, 1):
-                pair = {'number': number, 'order': variants, 'runs': {}}
+            for path in excluded:
+                (root / path).unlink()
+            timed_fixture = {**fixture, 'path': str(root), 'description': (
+                'Frozen eight-round clone with the byte-identical second PNG, scanned PDF and vector PDF removed.')}
+            for field in ('regular_files', 'expected_indexed_content', 'expected_records',
+                          'sample_payloads', 'duplicate_sample_payloads'):
+                timed_fixture[field] -= len(excluded)
+            verify_timed_fixture(root, paths, excluded)
+            for number, variants in remaining[:args.max_pairs]:
+                attempt = attempts[number] + 1
+                prefix = f'pair-{number:02d}' if attempt == 1 else f'pair-{number:02d}-attempt-{attempt:02d}'
+                while any((output / f'{prefix}-{variant}').exists() for variant in variants):
+                    attempt += 1
+                    prefix = f'pair-{number:02d}-attempt-{attempt:02d}'
+                pair = {'number': number, 'attempt': attempt, 'order': variants, 'runs': {}}
                 report['pairs'].append(pair)
                 quality = {}
+                save_json(report_path, report)
                 for variant in variants:
-                    label = f'pair-{number:02d}-{variant}'
+                    label = f'{prefix}-{variant}'
                     pair['runs'][variant], quality[variant] = run_one(
-                        working, output / label, fixture, cohorts, apps[variant], builds[variant]['sha256'],
+                        working, output / label, timed_fixture, cohorts, apps[variant], builds[variant]['sha256'],
                         args.timeout)
-                    if inspect_fixture(root, fixture)[0] != paths:
-                        raise ValueError(f'authored fixture payloads changed during {label}')
+                    verify_timed_fixture(root, paths, excluded)
                     save_json(report_path, report)
+                    if pair['runs'][variant].get('interrupted'):
+                        raise KeyboardInterrupt
                 if all(run['status'] == 'passed' for run in pair['runs'].values()):
                     pair['media_quality_differences'] = sorted(
                         path for path in quality['baseline'] if quality['baseline'][path] != quality['candidate'][path])
                 save_json(report_path, report)
-            if inspect_fixture(frozen, fixture)[0] != paths:
+                if pair.get('media_quality_differences') != []:
+                    raise ValueError(f'{prefix} did not complete both runs with equivalent OCR output')
+                completed.add(number)
+            if inspect_fixture(frozen, fixture)[0] != frozen_hashes:
                 raise ValueError('original frozen payloads changed during the experiment')
             report['frozen_payloads_verified_after_series'] = True
-        report['metrics'] = measurement_stats(report['pairs'])
-        report['status'] = 'passed' if all(pair.get('media_quality_differences') == [] for pair in report['pairs']) else 'error'
+        report['status'] = 'passed' if len(completed) == len(ORDER) else 'paused'
     except (Exception, KeyboardInterrupt) as error:
         report['status'] = 'error'
         report['error'] = str(error) or type(error).__name__
         print(report['error'], flush=True)
     finally:
+        report['metrics'] = measurement_stats(report['pairs'])
+        report['completed_pair_count'] = len(completed)
         report['finished_utc'] = datetime.now(timezone.utc).isoformat()
+        window.update(finished_utc=report['finished_utc'], status=report['status'])
+        if 'error' in report:
+            window['error'] = report['error']
         save_json(report_path, report)
-    return 0 if report['status'] == 'passed' else 1
+    return 0 if report['status'] in ('passed', 'paused') else 1
 
 
 if __name__ == '__main__':

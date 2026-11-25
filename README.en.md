@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2"><img src="https://img.shields.io/badge/release-v1.3.2-087e65" alt="Miji 1.3.2"></a>
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3"><img src="https://img.shields.io/badge/release-v1.3.3-087e65" alt="Miji 1.3.3"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-172f2a?logo=apple&logoColor=white" alt="macOS 14 or later">
   <img src="https://img.shields.io/badge/Apple_Silicon-arm64-172f2a" alt="Apple Silicon arm64">
   <img src="https://img.shields.io/badge/processing-on--device-087e65" alt="Recognition, indexing and search run on your Mac">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2"><b>Download Miji ↗</b></a> &nbsp; · &nbsp;
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3"><b>Download Miji ↗</b></a> &nbsp; · &nbsp;
   <a href="#quick-start">Quick start</a> &nbsp; · &nbsp;
   <a href="#search-syntax">Search syntax</a> &nbsp; · &nbsp;
   <a href="README.md">简体中文</a>
@@ -107,7 +107,7 @@ Indexing starts at `/`, including accessible system folders, hidden files and Li
 
 **Apple Silicon · macOS 14 or later**
 
-1. [Download Miji 1.3.2](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2), unzip `Miji-1.3.2-macOS-arm64.zip`, and drag 觅迹.app into Applications.
+1. [Download Miji 1.3.3](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3), unzip `Miji-1.3.3-macOS-arm64.zip`, and drag 觅迹.app into Applications.
 2. **First launch**: Miji is ad-hoc signed and not yet notarized by Apple. If macOS cannot verify the developer, try opening the app once, then choose **Open Anyway** in System Settings → Privacy & Security. If it says the app “is damaged,” confirm the archive came from this repository's Releases, then run:
 
    ```sh
@@ -272,4 +272,4 @@ The name-matching core and pinyin tables come from [Oil Find](https://github.com
 
 Miji is open source under the [MIT License](LICENSE). `Vendor/OilFind` retains its [original MIT license](Vendor/OilFind/LICENSE), included in the app bundle.
 
-<p align="center"><b>Less folder digging. More time for what you opened your Mac to do.</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.2">Download Miji ↗</a></p>
+<p align="center"><b>Less folder digging. More time for what you opened your Mac to do.</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3">Download Miji ↗</a></p>

@@ -47,13 +47,13 @@ final class SearchPreviewPolicyTests: XCTestCase {
         model.setSearchVisible(true); model.query = "sample"
         for _ in 0..<100 where model.hits.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertFalse(model.previewVisible); XCTAssertFalse(model.previewLoading)
-        XCTAssertEqual(model.panelWidth, 800)
+        XCTAssertEqual(model.panelWidth, PanelMetrics.compactWidth)
         model.previewMode = .shown
         XCTAssertTrue(model.previewVisible); XCTAssertFalse(model.previewLoading, "Metadata must not load content or thumbnails")
         model.previewMode = .automatic
         model.hits = [app, document]
         let width = model.panelWidth, height = model.panelHeight, columns = model.gridColumns
-        XCTAssertEqual(width, 1060)
+        XCTAssertEqual(width, PanelMetrics.previewWidth)
         model.selectedID = document.id
         for _ in 0..<100 where model.previewLoading { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertNil(model.previewLocalURL)
@@ -63,7 +63,7 @@ final class SearchPreviewPolicyTests: XCTestCase {
         XCTAssertEqual(model.panelWidth, width); XCTAssertEqual(model.panelHeight, height)
         XCTAssertEqual(model.gridColumns, columns)
         model.previewMode = .hidden
-        XCTAssertFalse(model.previewVisible); XCTAssertEqual(model.panelWidth, 800)
+        XCTAssertFalse(model.previewVisible); XCTAssertEqual(model.panelWidth, PanelMetrics.compactWidth)
         model.previewEnabled = true
         XCTAssertEqual(model.previewMode, .shown)
         model.setSearchVisible(false)

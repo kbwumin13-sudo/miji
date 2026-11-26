@@ -55,4 +55,9 @@ public final class OpenHistory: @unchecked Sendable {
         }
         return result
     }
+
+    func lastUses() -> [Int64: Double] {
+        lock.lock(); defer { lock.unlock() }
+        return entries.mapValues(\.last)
+    }
 }

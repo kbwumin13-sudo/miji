@@ -52,9 +52,17 @@ enum FileAction { case open, reveal, copyFile, copyPath, quickLook, preview, ope
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var query = "" { didSet { if query != oldValue { scheduleSearch() } } }
+    @Published var query = "" { didSet { if query != oldValue { scheduleSearch(); browse.queryChanged() } } }
+    @Published private(set) var mode = SearchMode.all
+    @Published var fileKind: FileKind? { didSet { if mode == .files && fileKind != oldValue { scheduleSearch() } } }
+    let browse = BrowseContent()
     @Published var hits: [SearchHit] = []
     @Published var selectedID: Int64? { didSet { loadPreview() } }
+    @Published private(set) var showsFileSelectionFeedback = false {
+        didSet {
+            if browsingRecent && showsFileSelectionFeedback != oldValue { loadPreview() }
+        }
+    }
     @Published var roots: [IndexedRoot] = []
     @Published var statistics = IndexStatistics()
     @Published var progress = IndexProgress()
@@ -90,11 +98,18 @@ final class AppModel: ObservableObject {
         get { previewMode != .hidden }
         set { previewMode = newValue ? .shown : .hidden }
     }
-    var previewVisible: Bool { searchPresented && SearchPreviewPolicy.showsPane(mode: previewMode, hits: hits) }
+    var previewVisible: Bool {
+        guard mode.searchesIndex, searchPresented,
+              SearchPreviewPolicy.showsPane(mode: previewMode, hits: hits) else { return false }
+        // Recent files wait for an explicit choice. Once open, keep the same
+        // layout while moving between previewable files and metadata-only rows.
+        return !browsingRecent || (displayedSnapshot == currentSnapshot && selectedFileForAction != nil)
+    }
     @Published var gridEnabled = false
     @Published var searchPresented = false
     @Published var showSettings = false
     @Published var focusSearch = UUID()
+    @Published var panelActivation = UUID()
     let database: SearchDatabase?
     private let searchDatabase: SearchDatabase?
     private let statusDatabase: SearchDatabase?
@@ -130,13 +145,51 @@ final class AppModel: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     var openMain: (() -> Void)?
     var selected: SearchHit? { hits.first { $0.id == selectedID } }
-    static func panelHeight(query: String, resultCount: Int) -> CGFloat {
-        query.isEmpty ? 100 : CGFloat(150 + min(7, max(2, resultCount)) * 59)
+    var browsingRecent: Bool { mode == .files && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var selectedFileForAction: SearchHit? {
+        browsingRecent && !showsFileSelectionFeedback ? nil : selected
+    }
+    var showsFileGrid: Bool { gridEnabled && !browsingRecent }
+    var panelHeight: CGFloat {
+        switch mode {
+        case .apps: return PanelMetrics.appHeight
+        case .clipboard: return PanelMetrics.clipboardHeight
+        case .files where browsingRecent: return PanelMetrics.fileHeight
+        case .all where query.isEmpty: return PanelMetrics.searchHeight
+        case .files, .all:
+            if previewVisible || showsFileGrid { return 563 }
+            let chrome = PanelMetrics.expandedHeaderHeight + PanelMetrics.scopeHeight + PanelMetrics.footerHeight + 12
+            return chrome + CGFloat(min(8, max(2, hits.count))) * (PanelMetrics.rowHeight + PanelMetrics.rowSpacing)
+        }
     }
     static let previewWidth: CGFloat = 440
-    var panelHeight: CGFloat { query.isEmpty ? 100 : (previewVisible || gridEnabled ? 563 : Self.panelHeight(query: query, resultCount: hits.count)) }
-    var gridColumns:Int {max(1,Int((panelWidth - (previewVisible ? Self.previewWidth : 0) - 24)/180))}
-    var panelWidth: CGFloat { !query.isEmpty && previewVisible ? 1060 : 800 }
+    var gridColumns: Int { max(1, Int((panelWidth - (previewVisible ? Self.previewWidth : 0) - 24) / 180)) }
+    var panelWidth: CGFloat {
+        if previewVisible && (browsingRecent || !query.isEmpty) { return PanelMetrics.previewWidth }
+        switch mode {
+        case .all: return PanelMetrics.compactWidth
+        case .apps: return PanelMetrics.appWidth
+        case .files: return PanelMetrics.fileWidth
+        case .clipboard: return PanelMetrics.clipboardWidth
+        }
+    }
+
+    func selectMode(_ target: SearchMode) {
+        if target != mode {
+            mode = target
+            hits = []; selectedID = nil
+            browse.queryChanged()
+            if target == .apps { browse.loadApps() }
+            if target == .clipboard { browse.checkClipboard() }
+            scheduleSearch()
+        }
+        focusSearch = UUID()
+    }
+
+    private var effectiveKind: FileKind? { mode == .files ? fileKind : kind }
+    private var effectiveScope: SearchScope { browsingRecent ? .name : scope }
+    private var effectiveSort: SearchSort { browsingRecent ? .modified : sort }
+    private var resultLimit: Int { browsingRecent ? 32 : 500 }
 
     init(searchExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])? = nil,
          supplementaryExecutor: ((SearchDatabase,String,SearchOptions,@escaping () -> Bool) throws -> [SearchHit])? = nil) {
@@ -241,8 +294,9 @@ final class AppModel: ObservableObject {
         if refreshAgain { refreshAgain=false; scheduleRefresh() }
     }
     private var canSearch: Bool {
-        searchVisible && !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty
+        searchVisible && mode.searchesIndex && (browsingRecent || !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
     }
+    private var shouldRefreshVisibleResults: Bool { canSearch && (!browsingRecent || hits.isEmpty) }
     private func recordCatalogChange(_ change:IndexChange) {
         if let previous=pendingCatalogChanges[change.rootID],!change.fullRescan {
             if !previous.fullRescan {
@@ -253,7 +307,7 @@ final class AppModel: ObservableObject {
         scheduleIndexRefresh()
     }
     private func scheduleIndexRefresh() {
-        guard !lifetimeTicket.isCancelled,indexRefreshWork == nil,canSearch || !pendingCatalogChanges.isEmpty else { return }
+        guard !lifetimeTicket.isCancelled,indexRefreshWork == nil,shouldRefreshVisibleResults || !pendingCatalogChanges.isEmpty else { return }
         // A fixed window also makes progress when commits keep arriving.
         let item=DispatchWorkItem { [weak self] in self?.applyIndexChanges() }
         indexRefreshWork=item
@@ -277,7 +331,7 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        searchNeedsRefresh=canSearch
+        searchNeedsRefresh=shouldRefreshVisibleResults
         searchNeedsCatalogRefresh=searchNeedsCatalogRefresh || !changes.isEmpty
         searchIndexChangesIfReady()
     }
@@ -297,8 +351,11 @@ final class AppModel: ObservableObject {
         if !visible { PreviewThumbnails.clear() }
         scheduleSearch()
         if visible { scheduleRefresh() }
+        if visible && mode == .apps { browse.loadApps() }
+        if visible && mode == .clipboard { browse.checkClipboard() }
     }
     private func scheduleSearch() {
+        clearSelectionFeedback()
         searchWork?.cancel(); searchWork=nil
         searchTicket?.cancel(); searchTicket=nil
         searchNeedsRefresh=false
@@ -317,7 +374,7 @@ final class AppModel: ObservableObject {
             startSearch(preservePresentation:false,delay:0.035)
         } else {
             endUserActivity()
-            if query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { hits=[]; selectedID=nil; searchMilliseconds=0 }
+            if !mode.searchesIndex || query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { hits=[]; selectedID=nil; searchMilliseconds=0 }
         }
     }
     private func endUserActivity() {
@@ -335,7 +392,11 @@ final class AppModel: ObservableObject {
     private func startSearch(preservePresentation:Bool,publishNames:Bool = false,delay:TimeInterval) {
         let token=UUID(); searchToken=token
         let ticket=SearchTicket(); searchTicket=ticket
-        let text=query; let options=SearchOptions(kind:kind,rootID:rootID,scope:scope,sort:sort,onlineOnly:!preferences.retainOffline,limit:500)
+        let text=query
+        let browsingRecent = self.browsingRecent
+        var requestOptions = SearchOptions(kind:effectiveKind,rootID:rootID,scope:effectiveScope,sort:effectiveSort,onlineOnly:!preferences.retainOffline,limit:resultLimit)
+        if mode == .files { requestOptions.excludedKind = .application }
+        let options = requestOptions
         let startedAt=Date()
         let previousContent=publishNames ? committedContentResults : []
         let item=DispatchWorkItem { [weak self] in
@@ -356,16 +417,21 @@ final class AppModel: ObservableObject {
                     var first:[SearchHit]=[]
                     if options.scope != .content,let engine {
                         var nameOptions=options; nameOptions.scope = .name
-                        let exclusions=options.scope == .all && QueryParser.parse(text).terms.contains {$0.field == .text && $0.isExcluded}
-                        var examined=0
-                        repeat {
-                            let ids=try engine.search(text,options:nameOptions,cancelled:{ticket.isCancelled})
-                            first += try database.nameHits(ids:Array(ids.dropFirst(examined)),query:text,verifyContentExclusions:exclusions,cancelled:{ticket.isCancelled})
-                            if !exclusions || first.count>=options.limit || ids.count<nameOptions.limit {break}
-                            examined=ids.count
-                            nameOptions.limit *= 2
-                        } while !ticket.isCancelled
-                        first=Array(first.prefix(options.limit))
+                        if browsingRecent {
+                            let ids = try engine.recentFiles(options: nameOptions, cancelled: { ticket.isCancelled })
+                            first = try database.nameHits(ids: ids, query: "", cancelled: { ticket.isCancelled })
+                        } else {
+                            let exclusions=options.scope == .all && QueryParser.parse(text).terms.contains {$0.field == .text && $0.isExcluded}
+                            var examined=0
+                            repeat {
+                                let ids=try engine.search(text,options:nameOptions,cancelled:{ticket.isCancelled})
+                                first += try database.nameHits(ids:Array(ids.dropFirst(examined)),query:text,verifyContentExclusions:exclusions,cancelled:{ticket.isCancelled})
+                                if !exclusions || first.count>=options.limit || ids.count<nameOptions.limit {break}
+                                examined=ids.count
+                                nameOptions.limit *= 2
+                            } while !ticket.isCancelled
+                            first=Array(first.prefix(options.limit))
+                        }
                     }
                     let names=first
                     // During a catalog refresh, show fresh names without
@@ -566,7 +632,7 @@ final class AppModel: ObservableObject {
     }
     func togglePause() { paused.toggle(); service?.setPaused(paused) }
     private func makeSnapshot(generation: UInt64) -> SearchSnapshot {
-        SearchSnapshot(generation:generation,query:query,kind:kind,rootID:rootID,scope:scope,sort:sort,onlineOnly:!preferences.retainOffline,limit:500)
+        SearchSnapshot(generation:generation,query:query,kind:effectiveKind,rootID:rootID,scope:effectiveScope,sort:effectiveSort,onlineOnly:!preferences.retainOffline,limit:resultLimit)
     }
     var searchStatus: SearchStatus {
         SearchStatus(phase:searchPhase,count:displayedSnapshot == currentSnapshot ? hits.count : 0,
@@ -575,16 +641,16 @@ final class AppModel: ObservableObject {
     }
     var activeFilters: [SearchFilter] {
         var result: [SearchFilter] = []
-        if let kind { result.append(SearchFilter(id:.kind,label:kind.title)) }
+        if let kind=effectiveKind { result.append(SearchFilter(id:.kind,label:kind.title)) }
         if let rootID { result.append(SearchFilter(id:.root,label:roots.first { $0.id == rootID }?.name ?? "指定位置")) }
-        if scope != .all { result.append(SearchFilter(id:.scope,label:scope == .name ? "仅文件名" : "仅内容")) }
-        if sort != .relevance { result.append(SearchFilter(id:.sort,label:sort == .modified ? "最近修改" : sort == .size ? "按大小" : "按名称")) }
+        if !browsingRecent && scope != .all { result.append(SearchFilter(id:.scope,label:scope == .name ? "仅文件名" : "仅内容")) }
+        if !browsingRecent && sort != .relevance { result.append(SearchFilter(id:.sort,label:sort == .modified ? "最近修改" : sort == .size ? "按大小" : "按名称")) }
         if !preferences.retainOffline { result.append(SearchFilter(id:.onlineOnly,label:"仅在线")) }
         return result
     }
     func removeFilter(_ id: SearchFilterID) {
         switch id {
-        case .kind: kind=nil
+        case .kind: if mode == .files { fileKind=nil } else { kind=nil }
         case .root: rootID=nil
         case .scope: scope = .all
         case .sort: sort = .relevance
@@ -592,7 +658,7 @@ final class AppModel: ObservableObject {
         }
     }
     func resetInterfaceFilters() {
-        kind=nil; rootID=nil; scope = .all; sort = .relevance
+        removeFilter(.kind); rootID=nil; scope = .all; sort = .relevance
         if !preferences.retainOffline { preferences.retainOffline=true; savePreferences() }
     }
     private static func volumeName(_ root: IndexedRoot) -> String {
@@ -645,7 +711,7 @@ final class AppModel: ObservableObject {
     }
     func performFileAction(_ action: FileAction, hit: SearchHit? = nil, snapshot: SearchSnapshot? = nil,
                            line: Int? = nil, pasteboard: NSPasteboard = .general) {
-        guard let hit=hit ?? selected, validateResult(hit,for:action,snapshot:snapshot) else { return }
+        guard let hit=hit ?? selectedFileForAction, validateResult(hit,for:action,snapshot:snapshot) else { return }
         let url=URL(fileURLWithPath:hit.path)
         switch action {
         case .copyPath:
@@ -666,15 +732,24 @@ final class AppModel: ObservableObject {
     func revealSelected() { performFileAction(.reveal) }
     func copySelectedPath() { performFileAction(.copyPath) }
     func copySelectedFile(to pasteboard:NSPasteboard = .general) { performFileAction(.copyFile,pasteboard:pasteboard) }
-    /// Opened results rank higher in later searches (OpenHistory).
+    /// Write history before the next search reads it, including after reopening the panel.
     private func recordOpen(_ id:Int64) {
         let engine=nameEngine
-        DispatchQueue.global(qos:.utility).async { engine?.recordOpen(id) }
+        searchQueue.async { engine?.recordOpen(id) }
     }
+    func selectFile(_ id: Int64) {
+        selectedID = id
+        if !showsFileSelectionFeedback { showsFileSelectionFeedback = true }
+    }
+
+    func clearSelectionFeedback() {
+        if showsFileSelectionFeedback { showsFileSelectionFeedback = false }
+    }
+
     func moveSelection(_ step:Int) {
         guard !hits.isEmpty else { return }
         let current=hits.firstIndex { $0.id==selectedID } ?? (step>0 ? -1 : hits.count)
-        selectedID=hits[min(max(current+step,0),hits.count-1)].id
+        selectFile(hits[min(max(current+step,0),hits.count-1)].id)
     }
     func showMainWindow() { openMain?(); if AppDelegate.isBackgroundUITesting {return}; NSApp.activate(ignoringOtherApps:true); NSApp.windows.first(where:{$0.identifier?.rawValue == "main" || $0.title.contains("觅迹")})?.makeKeyAndOrderFront(nil); focusSearch=UUID() }
 }

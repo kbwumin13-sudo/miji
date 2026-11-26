@@ -1,8 +1,7 @@
 import SwiftUI
 import MijiCore
 
-/// Preview column: fixed header and actions, one content well, fixed path row. It shares the
-/// panel's glass; a hairline in MainView separates it from the results.
+/// The preview shares the search surface and uses one inset for readable content.
 struct ResultPreviewPane: View {
     @ObservedObject var model: AppModel
     @State private var indexedExpanded = false
@@ -12,22 +11,24 @@ struct ResultPreviewPane: View {
             if let hit = model.selected {
                 let availability = model.resultAvailability(hit)
                 let snapshot = model.displayedSnapshot
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 11) {
                     header(hit, availability: availability)
                     notices(availability)
-                    matchLine(hit)
+                    if hit.matchedIn != "文件名" || model.previewPage != nil || model.previewLine != nil {
+                        matchLine(hit)
+                    }
                     content(hit).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    Divider()
+                    Divider().opacity(0.65)
                     HStack(alignment: .center, spacing: 8) {
                         Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(.tertiary).accessibilityHidden(true)
                         Text(hit.path).font(.system(size: 11)).foregroundStyle(.secondary)
-                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(hit.path)
+                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(hit.path)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Button { model.performFileAction(.copyPath, hit: hit, snapshot: snapshot) } label: { Image(systemName: "doc.on.doc") }
                             .buttonStyle(SearchIconButtonStyle()).foregroundStyle(.secondary).help("复制完整路径").accessibilityLabel("复制完整路径")
-                    }.padding(.bottom, -4)
+                    }
                 }
-                .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 12)
+                .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 8)
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "sidebar.right").font(.system(size: 26, weight: .light)).foregroundStyle(.tertiary)
@@ -43,28 +44,30 @@ struct ResultPreviewPane: View {
     private func header(_ hit: SearchHit, availability: ResultAvailability) -> some View {
         let snapshot = model.displayedSnapshot
         let originalUnavailable = availability.state == .diskOffline || availability.state == .fileUnavailable
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 12) {
-                Image(nsImage: FileIconCache.icon(hit)).resizable().scaledToFit().frame(width: 40, height: 40)
+        return VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .center, spacing: 13) {
+                Image(nsImage: FileIconCache.icon(hit)).resizable().scaledToFit().frame(width: 44, height: 44)
                     .opacity(originalUnavailable ? 0.6 : 1).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(hit.file.name).font(.system(size: 15, weight: .semibold)).lineLimit(2).textSelection(.enabled)
-                    Text(metadata(hit)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(hit.file.name).font(.system(size: 17, weight: .semibold))
+                        .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                    Text(metadata(hit)).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
-            HStack(spacing: 8) {
-                Button { model.performFileAction(.open, hit: hit, snapshot: snapshot) } label: { Text("打开").frame(minWidth: 44) }
-                    .buttonStyle(.borderedProminent)
+            HStack(spacing: 7) {
+                Button { model.performFileAction(.open, hit: hit, snapshot: snapshot) } label: { Label("打开", systemImage: "arrow.up.right") }
+                    .buttonStyle(SearchControlStyle(emphasized: true))
                 Button { model.performFileAction(.reveal, hit: hit, snapshot: snapshot) } label: { Label("定位", systemImage: "folder") }
-                    .help("在 Finder 中显示")
+                    .buttonStyle(SearchControlStyle()).help("在 Finder 中显示")
                 Button { model.performFileAction(.copyFile, hit: hit, snapshot: snapshot) } label: { Label("复制", systemImage: "doc.on.doc") }
-                    .help("复制文件").accessibilityLabel("复制文件")
+                    .buttonStyle(SearchControlStyle()).help("复制文件").accessibilityLabel("复制文件")
                 Spacer(minLength: 0)
                 Button { model.performFileAction(.quickLook, hit: hit, snapshot: snapshot) } label: { Image(systemName: "eye") }
+                    .buttonStyle(SearchIconButtonStyle()).foregroundStyle(.secondary)
                     .help("快速查看 · ⌘Y").accessibilityLabel("快速查看")
             }
-            .buttonBorderShape(.capsule).controlSize(.regular)
+            .labelStyle(.titleAndIcon)
             .disabled(originalUnavailable || !model.isCurrentResult(hit))
             .help(availability.message ?? "打开或定位原文件，也可复制文件")
         }
@@ -233,7 +236,7 @@ private struct TrailingIconLabel: LabelStyle {
 private extension View {
     /// The single reading surface of the preview: a faint, rounded well on the panel material.
     func contentWell() -> some View {
-        background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.05)))
+        background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.045)))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

@@ -213,6 +213,19 @@ public final class NameSearchEngine: @unchecked Sendable {
 
     public func search(_ query: String, options: SearchOptions = SearchOptions(),
                        cancelled: @escaping () -> Bool = { false }) throws -> [Int64] {
+        try search(query, options: options, lastUses: [:], cancelled: cancelled)
+    }
+
+    /// Put files used in Miji first, then fill the list with recently modified files.
+    public func recentFiles(options: SearchOptions, cancelled: @escaping () -> Bool = { false }) throws -> [Int64] {
+        var options = options
+        options.scope = .name
+        options.sort = .modified
+        return try search("", options: options, lastUses: openHistory?.lastUses() ?? [:], cancelled: cancelled)
+    }
+
+    private func search(_ query: String, options: SearchOptions, lastUses: [Int64: Double],
+                        cancelled: @escaping () -> Bool) throws -> [Int64] {
         if cancelled() { throw CancellationError() }
         operationLock.lock(); defer { operationLock.unlock() }
         if cancelled() { throw CancellationError() }
@@ -246,6 +259,9 @@ public final class NameSearchEngine: @unchecked Sendable {
             filters.append(NameMetadataFilter(value: value, isKind: isKind, isExcluded: term.isExcluded))
         }
         let kind = options.kind.flatMap { current.kindKeys[$0.rawValue] }
+        if let excluded = options.excludedKind.flatMap({ current.kindKeys[$0.rawValue] }) {
+            filters.append(NameMetadataFilter(value: excluded, isKind: true, isExcluded: true))
+        }
         if options.kind != nil && kind == nil { return [] }
         let textTerms = parsed.terms.filter { $0.field == .text }.map { CompactNameIndex.Term(value: $0.value, excluded: $0.isExcluded) }
         // Recently opened files rise among comparable matches. A 64K-bit
@@ -262,7 +278,14 @@ public final class NameSearchEngine: @unchecked Sendable {
         var heap = NameHitHeap(capacity: min(options.limit, current.liveCount)) { a, b in
             switch options.sort {
             case .relevance: if a.score != b.score { return a.score > b.score }
-            case .modified: if current.modified[Int(a.index)] != current.modified[Int(b.index)] { return current.modified[Int(a.index)] > current.modified[Int(b.index)] }
+            case .modified:
+                let left = Int(a.index), right = Int(b.index)
+                if !lastUses.isEmpty {
+                    let leftUse = lastUses[current.ids[left]] ?? -.infinity
+                    let rightUse = lastUses[current.ids[right]] ?? -.infinity
+                    if leftUse != rightUse { return leftUse > rightUse }
+                }
+                if current.modified[left] != current.modified[right] { return current.modified[left] > current.modified[right] }
             case .size: if current.sizes[Int(a.index)] != current.sizes[Int(b.index)] { return current.sizes[Int(a.index)] > current.sizes[Int(b.index)] }
             case .name: break
             }

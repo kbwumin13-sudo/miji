@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3"><img src="https://img.shields.io/badge/release-v1.3.3-087e65" alt="Miji 1.3.3"></a>
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0"><img src="https://img.shields.io/badge/release-v1.4.0-087e65" alt="Miji 1.4.0"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-172f2a?logo=apple&logoColor=white" alt="macOS 14 or later">
   <img src="https://img.shields.io/badge/Apple_Silicon-arm64-172f2a" alt="Apple Silicon arm64">
   <img src="https://img.shields.io/badge/processing-on--device-087e65" alt="Recognition, indexing and search run on your Mac">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3"><b>Download Miji ↗</b></a> &nbsp; · &nbsp;
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0"><b>Download Miji ↗</b></a> &nbsp; · &nbsp;
   <a href="#quick-start">Quick start</a> &nbsp; · &nbsp;
   <a href="#search-syntax">Search syntax</a> &nbsp; · &nbsp;
   <a href="README.md">简体中文</a>
@@ -107,7 +107,7 @@ Indexing starts at `/`, including accessible system folders, hidden files and Li
 
 **Apple Silicon · macOS 14 or later**
 
-1. [Download Miji 1.3.3](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3), unzip `Miji-1.3.3-macOS-arm64.zip`, and drag 觅迹.app into Applications.
+1. [Download Miji 1.4.0](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0), unzip `Miji-1.4.0-macOS-arm64.zip`, and drag 觅迹.app into Applications.
 2. **First launch**: Miji is ad-hoc signed and not yet notarized by Apple. If macOS cannot verify the developer, try opening the app once, then choose **Open Anyway** in System Settings → Privacy & Security. If it says the app “is damaged,” confirm the archive came from this repository's Releases, then run:
 
    ```sh
@@ -119,12 +119,15 @@ Indexing starts at `/`, including accessible system folders, hidden files and Li
 
 A SHA-256 checksum file is included on the release page. Upgrades preserve your index, scan scope and settings, with no rebuild required.
 
+Use the buttons beside the search field to switch between Applications, Files and Clipboard. The Files view shows recently used files. Select one to preview supported images, document text and media on the right. Clipboard history is opt-in and is cleared when you quit Miji.
+
 <details>
 <summary>All keyboard shortcuts</summary>
 
 | Keys | Action |
 | --- | --- |
 | `⌃⌥Space` | Show / hide search |
+| `⌘1` / `⌘2` / `⌘3` / `⌘0` | Applications / Files / Clipboard / All search |
 | `↑` `↓` | Move selection |
 | `Return` | Open |
 | `⌘Return` / `⌘R` | Reveal in Finder |
@@ -133,7 +136,7 @@ A SHA-256 checksum file is included on the release page. Upgrades preserve your 
 | `⌘⇧C` | Copy path |
 | `⌘F` | Return to the search field |
 | `⌘,` | Index & Settings |
-| `Esc` / `⌘W` | Hide |
+| `Esc` / `⌘W` | Close the recent file preview, go back, or hide search |
 
 The top tabs filter by file type. The filter menu controls name / content scope, indexed location and sort order.
 
@@ -142,7 +145,7 @@ The top tabs filter by file type. The filter menu controls name / content scope,
 <details>
 <summary>How adaptive previews work</summary>
 
-Automatic mode keeps application, folder, archive and other metadata-only searches in a compact list, while pictures, documents, code and media keep the content pane. The footer offers Automatic / Show / Hide, and an explicit choice persists across searches. The whole result set determines the layout, so selection changes and loading failures do not resize the window.
+Automatic mode keeps metadata-only searches in a compact list and shows the content pane for pictures, documents, code and media. Choose Automatic / Show / Hide from the preview submenu under ⋯. In Recent Files, the pane opens after you select a file and keeps its size as you move between results.
 
 File actions and full-path copying stay visible while text and code scroll independently. Offline results use stored content; previews never automatically unpack, download or re-extract files.
 
@@ -272,4 +275,4 @@ The name-matching core and pinyin tables come from [Oil Find](https://github.com
 
 Miji is open source under the [MIT License](LICENSE). `Vendor/OilFind` retains its [original MIT license](Vendor/OilFind/LICENSE), included in the app bundle.
 
-<p align="center"><b>Less folder digging. More time for what you opened your Mac to do.</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3">Download Miji ↗</a></p>
+<p align="center"><b>Less folder digging. More time for what you opened your Mac to do.</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0">Download Miji ↗</a></p>

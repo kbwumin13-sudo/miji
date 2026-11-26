@@ -41,4 +41,18 @@ final class SearchKeyActionTests: XCTestCase {
         XCTAssertEqual(SearchKeyAction.action(for: key(49), firstResponder: NSView()), .preview)
         XCTAssertNil(SearchKeyAction.action(for: key(0), firstResponder: editor))
     }
+
+    @MainActor
+    func testBrowseShortcutsPreserveMarkedTextAndArrowEditing() {
+        let editor = NSTextView()
+        XCTAssertEqual(SearchKeyAction.action(for: key(18, modifiers: .command), firstResponder: editor), .selectMode(.apps))
+        XCTAssertEqual(SearchKeyAction.action(for: key(19, modifiers: .command), firstResponder: editor), .selectMode(.files))
+        XCTAssertEqual(SearchKeyAction.action(for: key(20, modifiers: .command), firstResponder: editor), .selectMode(.clipboard))
+        XCTAssertEqual(SearchKeyAction.action(for: key(29, modifiers: .command), firstResponder: editor), .selectMode(.all))
+        XCTAssertNil(SearchKeyAction.action(for: key(18, modifiers: [.command, .shift]), firstResponder: editor))
+        XCTAssertNil(SearchKeyAction.action(for: key(123), firstResponder: editor))
+        XCTAssertEqual(SearchKeyAction.action(for: key(123), firstResponder: editor, navigateHorizontally: true), .moveLeft)
+        editor.setMarkedText("x", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertNil(SearchKeyAction.action(for: key(18, modifiers: .command), firstResponder: editor))
+    }
 }

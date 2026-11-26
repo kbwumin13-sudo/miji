@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3"><img src="https://img.shields.io/badge/release-v1.3.3-087e65" alt="觅迹 1.3.3"></a>
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0"><img src="https://img.shields.io/badge/release-v1.4.0-087e65" alt="觅迹 1.4.0"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-172f2a?logo=apple&logoColor=white" alt="macOS 14 或更新版本">
   <img src="https://img.shields.io/badge/Apple_Silicon-arm64-172f2a" alt="Apple Silicon arm64">
   <img src="https://img.shields.io/badge/processing-on--device-087e65" alt="识别、索引与查询全部在本机完成">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3"><b>下载觅迹 ↗</b></a> &nbsp; · &nbsp;
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0"><b>下载觅迹 ↗</b></a> &nbsp; · &nbsp;
   <a href="#快速开始">快速开始</a> &nbsp; · &nbsp;
   <a href="#搜索语法">搜索语法</a> &nbsp; · &nbsp;
   <a href="README.en.md">English</a>
@@ -107,7 +107,7 @@
 
 **Apple Silicon · macOS 14 或更新版本**
 
-1. [下载觅迹 1.3.3](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3)，解压 `Miji-1.3.3-macOS-arm64.zip`，将「觅迹.app」拖入「应用程序」。
+1. [下载觅迹 1.4.0](https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0)，解压 `Miji-1.4.0-macOS-arm64.zip`，将「觅迹.app」拖入「应用程序」。
 2. **首次打开**：应用使用 ad-hoc 签名，尚未经过 Apple 公证。若提示无法验证开发者，先尝试打开一次，再到「系统设置 → 隐私与安全性」点击「仍要打开」。若提示「已损坏」，确认安装包来自本仓库的 Releases 后，在终端执行：
 
    ```sh
@@ -119,12 +119,15 @@
 
 下载页同时提供 SHA-256 校验文件。升级保留现有索引、扫描范围和设置，无需重建。
 
+搜索框右侧可切换应用程序、文件和剪贴板。文件页直接显示最近使用的文件，选中后可在右侧预览图片、正文和其他支持的内容。剪贴板历史需手动开启，退出觅迹时清除。
+
 <details>
 <summary>完整快捷键</summary>
 
 | 按键 | 操作 |
 | --- | --- |
 | `⌃⌥Space` | 唤起 / 收起搜索 |
+| `⌘1` / `⌘2` / `⌘3` / `⌘0` | 应用程序 / 文件 / 剪贴板 / 全部搜索 |
 | `↑` `↓` | 选择结果 |
 | `Return` | 打开 |
 | `⌘Return` / `⌘R` | 在 Finder 中显示 |
@@ -133,7 +136,7 @@
 | `⌘⇧C` | 复制路径 |
 | `⌘F` | 回到搜索框 |
 | `⌘,` | 索引与设置 |
-| `Esc` / `⌘W` | 收起 |
+| `Esc` / `⌘W` | 收起最近文件的预览，或逐级返回、收起浮窗 |
 
 顶部标签按类型筛选，「筛选」菜单可切换文件名 / 内容范围、索引位置和排序方式。
 
@@ -142,7 +145,7 @@
 <details>
 <summary>自适应预览如何工作</summary>
 
-「自动」模式让应用、文件夹、压缩包等结果使用紧凑列表，图片、文档、代码与媒体保留内容预览。底部菜单可选择「自动／显示／隐藏」，显式选择在后续搜索中保持。整组结果决定分栏，切换选中项或加载失败不会改变窗口尺寸。
+「自动」模式让应用、文件夹、压缩包等结果使用紧凑列表，图片、文档、代码与媒体保留内容预览。从「⋯ → 预览栏」可选择「自动／显示／隐藏」。最近文件在明确选中后展开预览，分栏打开后切换文件时保持窗口大小。
 
 文件操作与完整路径复制保持可见，文本和代码独立滚动；离线时显示已索引内容，不为预览自动解包、下载或重新提取。
 
@@ -272,4 +275,4 @@ python3 scripts/e2e-check.py --cli .build/release/miji-cli   # 端到端检查
 
 觅迹以 [MIT License](LICENSE) 开源；`Vendor/OilFind` 保留[原 MIT 许可证](Vendor/OilFind/LICENSE)，随应用一同分发。
 
-<p align="center"><b>少翻几个文件夹，多留一点时间给正在做的事。</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.3.3">下载觅迹 ↗</a></p>
+<p align="center"><b>少翻几个文件夹，多留一点时间给正在做的事。</b><br><a href="https://github.com/kbwumin13-sudo/miji/releases/tag/v1.4.0">下载觅迹 ↗</a></p>

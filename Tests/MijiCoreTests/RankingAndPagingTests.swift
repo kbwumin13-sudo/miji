@@ -116,6 +116,34 @@ final class RankingAndPagingTests: XCTestCase {
         XCTAssertEqual(try restarted.search("report"), [own, draft, dated, cached])
     }
 
+    func testRecentFilesRankByLastUseBeforeApplyingTheLimit() throws {
+        let docs = (1...40).map { i in
+            Doc(path: "file-\(i).txt", size: 1, modified: Double(i), text: "sample")
+        }
+        let ids = try add(docs)
+        let oldest = try XCTUnwrap(ids["file-1.txt"])
+        let nextOldest = try XCTUnwrap(ids["file-2.txt"])
+        let newest = try XCTUnwrap(ids["file-40.txt"])
+        try db.upsertFiles([FileRecord(rootID: "r", relativePath: "Sample.app", name: "Sample.app",
+                                       fileExtension: "app", kind: .application, size: 1, modified: 41)], generation: 1)
+        let app = try XCTUnwrap(db.pendingFiles(rootID: "r", limit: 50).first { $0.kind == .application })
+        let engine = try NameSearchEngine(databaseURL: url)
+        let history = try XCTUnwrap(engine.openHistory)
+        let now = Date().timeIntervalSince1970
+        history.record(nextOldest, now: now - 10)
+        history.record(oldest, now: now - 1)
+        history.record(app.id, now: now)
+
+        let restarted = try NameSearchEngine(databaseURL: url)
+        try restarted.load()
+        var options = SearchOptions(rootID: "r", scope: .name, sort: .modified, limit: 3)
+        options.excludedKind = .application
+        XCTAssertEqual(try restarted.recentFiles(options: options), [oldest, nextOldest, newest])
+        XCTAssertEqual(try restarted.search("", options: options), [newest, ids["file-39.txt"]!, ids["file-38.txt"]!])
+        options.kind = .image
+        XCTAssertEqual(try restarted.recentFiles(options: options), [])
+    }
+
     func testBodyTermChecksMatchNormalizedContains() {
         let bodies = ["README for the Project", "readme.md\nSecond LINE", "数学分析期末复习 README", "混合 Mixed Café 数学",
                       "cafe\u{301} au lait", "ÉCOLE École école", "Ｆｕｌｌ width ＡＢＣ", "", "数学", "x\u{0}y needle",

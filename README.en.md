@@ -21,75 +21,39 @@
   <a href="README.md">简体中文</a>
 </p>
 
-**Miji (觅迹) is a native Mac search app built for Chinese file names and content.** Start with whatever you remember: part of a name, a phrase in a document, or a few words in a screenshot. Search names, pinyin, document text, image text and image labels from one box. Recognition, indexing and search run entirely on your Mac. The app interface is in Simplified Chinese.
+**Find a file from the part you remember.** Miji is native macOS search for filenames, pinyin, document text and words inside images. Select a result to see its contents. Recognition, indexing and search run on your Mac.
+
+## See the new search window
+
+<p align="center">
+  <a href="https://github.com/kbwumin13-sudo/miji/releases/download/v1.4.0/Miji-1.4.0-demo.mp4"><img src="docs/assets/miji-1.4.0-motion.gif" width="900" alt="Miji 1.4.0 in action: open search, enter Files, select a file to reveal its preview, and dismiss the window"></a>
+</p>
+<p align="center"><sub>Recorded in the release build with fictional files · <a href="https://github.com/kbwumin13-sudo/miji/releases/download/v1.4.0/Miji-1.4.0-demo.mp4">Download the full-resolution MP4</a></sub></p>
+
+### Three modes in one window
+
+| Mode | Shortcut | What you can do |
+| --- | --- | --- |
+| Applications | `⌘1` | Browse apps by category, select one with the keyboard, and launch it. |
+| Files | `⌘2` | Browse recently used files, filter by type, and select a file to preview it on the right. |
+| Clipboard | `⌘3` | Opt in to recording, then search and copy items from the current session. History clears when you quit. |
+
+Press `⌘0` to return to all search. The window follows the system's light or dark appearance and uses native Liquid Glass where available.
 
 ## A little memory goes a long way
 
-| You remember… | Try typing | Miji looks for… |
+| What you remember | Try | How Miji finds it |
 | --- | --- | --- |
-| 海棠灌溉 (garden irrigation), without switching input methods | `htgg` / `haitang` | Chinese file names matched by pinyin initials or full pinyin |
-| A plan mentioning 滴灌 (drip irrigation) | `滴灌 ext:pdf` | Text inside PDFs, including OCR from scanned pages |
-| A screenshot with 花园计划 (garden plan) | `花园计划 kind:image` | Words recognized inside images |
-| A bird photo named IMG-something | `鸟 kind:image` | Photos with locally recognized bird labels |
+| The filename contains 海棠灌溉 | `htgg` / `haitang` | Match Chinese filenames by initials or full pinyin |
+| A proposal mentioned 滴灌 | `滴灌 ext:pdf` | Search PDF text, including scanned pages processed by OCR |
+| A screenshot said 花园计划 | `花园计划 kind:图片` | Find images containing those words |
+| You photographed a bird, but the filename starts with IMG | `鸟 kind:图片` | Search on-device image labels |
 
-These examples use fictional materials.
+## Find it and take a look
 
-**Unplug the drive. Keep the clues.** Once indexed, an external drive's file catalog, extracted text and image labels stay searchable. Find out where the file lives, then reconnect the right drive to open it.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-search-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-search-light.webp">
-    <img src="docs/assets/miji-1.3.0-40a1d67-search-light.webp" alt="Miji 1.3.0: content matches, snippets, search status and highlighted previews using fictional files" width="800">
-  </picture>
-</p>
-<p align="center"><sub>Captured from 1.3.0 / build 14 (40a1d67) with fictional files. Later core fixes leave the appearance unchanged. On-screen timings apply only to this sample.</sub></p>
-
-## 1.3.0: find the clue, see the context
-
-- **Older content gets a chance to surface**: content search no longer stops after filling a page solely from recently indexed files. Earlier content also enters candidate exploration; content matches are ranked by relevance and include snippets.
-- **See where the search stands**: the interface shows search progress and whether a search budget limited the results. Changing the query prevents stale results from being acted on as current matches.
-- **Filters you can see and remove**: active conditions are visible and individually removable, so it is clear what is narrowing the results.
-- **Tell same-named files apart**: each result shows “parent folder · disk name.” Offline drives and unavailable original files have distinct messages to help you decide what to do next.
-- **A native look that follows your Mac**: the interface follows the system's light or dark appearance, uses system Liquid Glass on macOS 26 and later, and retains a dark frosted-glass option.
-
-Candidate exploration has time and decompression budgets; it does not guarantee a search of every indexed passage. If the interface reports limited results, add keywords or narrow the file type, path or location.
-
-## Find it. Take a look. Keep going.
-
-Select a result in the search window to check whether it is the one you need. The preview adapts to the result types, and you can also show or hide it manually.
-
-- **Read the matching passage**: highlighted snippets explain the match; PDFs open at the matching page, with a separate reading window available.
-- **Jump to the matching line**: code previews show line locations and can open them in VS Code, VS Code Insiders or Cursor when set as your default editor.
-- **Browse pictures and play media**: switch between list and thumbnail grid; audio and video play on demand and stop when you switch results or close the preview.
-- **Keep your hands on the keyboard**: `Return` opens, `⌘Return` reveals in Finder, `⌘C` copies the file, and `⌘⇧C` copies its path.
-
-<details>
-<summary>See filters, same-named files and the thumbnail grid</summary>
-
-**Visible filters, clearer locations.** Switch file types, remove individual conditions or reset them. “Parent folder · disk name” tells you where each result lives; disconnected drives are marked offline.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-filters-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-filters-light.webp">
-    <img src="docs/assets/miji-1.3.0-40a1d67-filters-light.webp" alt="Miji 1.3.0: removable filters and same-named files in different folders and drives" width="800">
-  </picture>
-</p>
-
-**Browse results visually.** The grid shows thumbnails, file names and locations for browsing pictures and documents.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/miji-1.3.0-40a1d67-grid-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/miji-1.3.0-40a1d67-grid-light.webp">
-    <img src="docs/assets/miji-1.3.0-40a1d67-grid-light.webp" alt="Miji 1.3.0: thumbnail grid, selected file name and offline drive locations" width="800">
-  </picture>
-</p>
-
-Both pairs also come from 1.3.0 / build 14 (40a1d67), using the same fictional dataset.
-
-</details>
+- **See if it’s the file you need.** Preview results on the right. See highlighted text, matching PDF pages or code lines, and play supported media.
+- **Tell identical names apart.** Results and previews show where each file lives. Narrow a query by type, path or indexed location and remove filters individually.
+- **Keep searching after unplugging a drive.** Indexed filenames, extracted text and image labels remain searchable. Reconnect the drive to open the original.
 
 ## Built for everyday searching
 
@@ -192,6 +156,8 @@ Up to 500 results are shown. Narrow them down by type, location or more keywords
 </details>
 
 ## Performance and verification
+
+The 1.4.0 release passed 257 automated tests (2 skipped) and 52 end-to-end checks, covering external APFS volumes, offline indexes, and content search.
 
 1.3.0 checks candidate coverage, ranking and latency on a fixed fictional dataset: 800 files and 24 tasks, including 6 held out. Relevance labels are provisional development labels, without user-validated real-world task judgments.
 

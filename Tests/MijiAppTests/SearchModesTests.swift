@@ -129,4 +129,21 @@ final class SearchModesTests: XCTestCase {
         XCTAssertTrue(browser.history.isEmpty)
         XCTAssertEqual(board.string(forType: .string), "Harbor sample")
     }
+
+    func testClipboardImagePreviewFitsLargeImagesAndHandlesInvalidData() throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 1600, height: 800, bitsPerComponent: 8,
+                                             bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.fill(CGRect(x: 0, y: 0, width: 1600, height: 800))
+        let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(context.makeImage()))
+
+        for format: NSBitmapImageRep.FileType in [.png, .tiff] {
+            let data = try XCTUnwrap(bitmap.representation(using: format, properties: [:]))
+            let image = try XCTUnwrap(ClipboardImagePreview.makeImage(from: data))
+            XCTAssertEqual(image.width, 1280)
+            XCTAssertEqual(image.height, 640)
+        }
+
+        XCTAssertNil(ClipboardImagePreview.makeImage(from: Data("broken image".utf8)))
+    }
 }

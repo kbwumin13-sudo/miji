@@ -136,7 +136,17 @@ final class AppDelegate:NSObject,NSApplicationDelegate,@preconcurrency QLPreview
                     if let item = entries.first(where: { $0.id == self.model.browse.clipboardSelection }) ?? entries.first { self.copyClipboardEntry(item) }
                 case .all, .files: self.model.openSelected()
                 }
-            case nil: return event
+            case nil:
+                if (mode == .apps && self.model.browse.appSelection != nil) || self.model.showsFileSelectionFeedback,
+                   let editor = self.searchPanel.firstResponder as? NSTextView, editor.isFieldEditor, !editor.hasMarkedText() {
+                    // The IME can start editing before SwiftUI publishes a new query.
+                    DispatchQueue.main.async { [weak self, weak editor] in
+                        guard let self, let editor, NSApp.keyWindow === self.searchPanel,
+                              self.searchPanel.firstResponder === editor, editor.hasMarkedText() else { return }
+                        self.model.focusSearch = UUID()
+                    }
+                }
+                return event
             }
             return nil
         }
